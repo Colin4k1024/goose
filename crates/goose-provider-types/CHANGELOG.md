@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.14](https://github.com/Colin4k1024/goose/compare/gdk-v0.1.0-alpha.13...gdk-v0.1.0-alpha.14) - 2026-10-27
+
+### Fixed
+
+- *(deps)* bump zstd to 0.14.3 for RUSTSEC advisories ([#13162](https://github.com/Colin4k1024/goose/pull/13162))
+- *(openrouter)* resolve variant suffixes like :free and :nitro to the base model ([#12979](https://github.com/Colin4k1024/goose/pull/12979))
+
 ## [0.1.0-alpha.13](https://github.com/aaif-goose/goose/compare/gdk-v0.1.0-alpha.12...gdk-v0.1.0-alpha.13) - 2026-10-23
 
 ### Fixed
