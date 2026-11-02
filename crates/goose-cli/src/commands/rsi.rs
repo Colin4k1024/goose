@@ -113,16 +113,14 @@ fn append_rolled_back_event(log_path: &std::path::Path, version: u32) -> Result<
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let event = serde_json::json!({
-        "cycle": 0,
-        "timestamp": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        "proposal_id": "",
-        "event": "rolled_back",
-        "reason": format!("manual rollback to version {}", version),
-    });
+    let event = EvolutionEvent {
+        cycle: 0,
+        timestamp: std::time::SystemTime::now(),
+        proposal_id: String::new(),
+        kind: EventKind::RolledBack {
+            reason: format!("manual rollback to version {}", version),
+        },
+    };
     let mut line = serde_json::to_string(&event)?;
     line.push('\n');
     use std::io::Write;

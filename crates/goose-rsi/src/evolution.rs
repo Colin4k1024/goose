@@ -163,7 +163,7 @@ impl EvolutionLoop {
 
         let _lock = match self.acquire_lock() {
             Ok(lock) => lock,
-            Err(_) => {
+            Err(LoopError::AlreadyRunning) => {
                 self.append_event(0, "", &EventKind::SkippedConcurrent)?;
                 return Ok(CycleOutcome {
                     cycle: self.next_cycle_number(),
@@ -173,6 +173,7 @@ impl EvolutionLoop {
                     fitness_score: None,
                 });
             }
+            Err(e) => return Err(e),
         };
 
         // Startup recovery: heal any crashed apply from a previous cycle.
@@ -266,10 +267,9 @@ impl EvolutionLoop {
 
         if !passed_gate {
             // Fitness regressed: record, roll back (no-op since nothing was
-            // applied yet), update the breaker.
-            machine
-                .transit(ProposalState::Validating, ProposalState::RolledBack)
-                .ok();
+            // applied yet), update the breaker. The state machine stays in
+            // Validating — there is no legal Validating→RolledBack edge, and
+            // the machine is local (not persisted), so we simply drop it.
             self.append_event(
                 cycle,
                 &proposal.id.to_string(),

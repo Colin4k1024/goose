@@ -202,6 +202,13 @@ async fn breaker_pauses_subsequent_triggers() {
         outcome.fitness_score.is_none(),
         "paused tick must not evaluate fitness"
     );
+
+    let log = read_evolution_log(managed.path());
+    assert!(
+        log.iter()
+            .any(|e| matches!(e.kind, EventKind::SkippedPaused)),
+        "a paused trigger must log SkippedPaused"
+    );
 }
 
 #[tokio::test]
