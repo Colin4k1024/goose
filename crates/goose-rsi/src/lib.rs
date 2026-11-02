@@ -27,6 +27,7 @@
 //! (issue #4) and the evolution log + CLI (issue #5). Those layers are out of
 //! scope here: this crate defines the contract they must respect.
 
+pub mod fitness;
 pub mod proposal;
 pub mod state;
 pub mod whitelist;
