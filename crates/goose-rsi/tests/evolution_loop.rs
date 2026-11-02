@@ -234,10 +234,19 @@ async fn resume_clears_the_breaker() {
     );
 
     loop_.resume().unwrap();
-    // After resume, a tick runs again (and regresses, but is not skipped).
+
+    // Verify breaker is cleared in the state file.
+    let breaker_raw =
+        std::fs::read_to_string(managed.path().join("rsi/circuit-breaker.json")).unwrap();
+    let breaker: serde_json::Value = serde_json::from_str(&breaker_raw).unwrap();
+    assert_eq!(breaker["paused"], false, "resume must clear the breaker");
+    assert_eq!(breaker["consecutive_failures"], 0);
+
+    // Post-resume tick must run the pipeline (fitness_score is Some when
+    // the pipeline ran, None when skipped).
     let outcome = loop_.tick().await.unwrap();
     assert!(
-        outcome.rolled_back,
+        outcome.fitness_score.is_some(),
         "post-resume tick must run the pipeline, not skip"
     );
 }
