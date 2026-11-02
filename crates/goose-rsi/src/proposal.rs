@@ -33,7 +33,7 @@ pub struct FitnessExpectation {
 /// keys inside `config.yaml` (e.g. `GOOSE_MODEL`). Secrets never travel as
 /// config keys: they live in `secrets.yaml*`, which the deny list blocks as a
 /// file path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MutationTarget {
     FilePath { path: String },
