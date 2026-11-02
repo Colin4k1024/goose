@@ -17,6 +17,7 @@ use goose_rsi::apply::{
 };
 use goose_rsi::fitness::FitnessReport;
 use goose_rsi::proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
+use goose_rsi::whitelist::validate_target;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -518,4 +519,55 @@ fn rollback_to_missing_version_fails_cleanly() {
         error,
         ApplyError::MissingBackup { version: 99, .. }
     ));
+}
+
+/// #3 review contract: validated paths reach the filesystem verbatim. The
+/// whitelist matches literal strings, so an encoded name such as
+/// `recipes/%73ecrets.yaml` is an ordinary recipe file; the apply layer must
+/// therefore neither percent-decode it (which would land on the deny-listed
+/// `recipes/secrets.yaml`) nor canonicalize/re-normalize it (TOCTOU between
+/// validated and written path).
+#[test]
+fn encoded_paths_are_written_verbatim_and_never_decoded() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("recipes")).unwrap();
+    let config = ApplyConfig::new(root.path());
+
+    let encoded = "recipes/%73ecrets.yaml";
+    validate_target(&MutationTarget::FilePath {
+        path: encoded.to_string(),
+    })
+    .expect("literal encoded name is an ordinary recipe, not a secret store");
+    assert!(
+        validate_target(&MutationTarget::FilePath {
+            path: "recipes/secrets.yaml".to_string(),
+        })
+        .is_err(),
+        "control: the decoded form is deny-listed"
+    );
+
+    let proposal = proposal_with(vec![MutationTarget::FilePath {
+        path: encoded.to_string(),
+    }]);
+    let changes = vec![Change::FileChange {
+        path: encoded.to_string(),
+        content: "version: 1\n".to_string(),
+    }];
+    apply(
+        &config,
+        &proposal,
+        &passing_report(&proposal, 0.9),
+        &changes,
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        root.path().join(encoded).exists(),
+        "the file must be written under the validated literal name"
+    );
+    assert!(
+        !root.path().join("recipes/secrets.yaml").exists(),
+        "an encoded target must never be decoded onto a deny-listed path"
+    );
 }

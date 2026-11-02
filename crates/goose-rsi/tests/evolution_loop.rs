@@ -70,6 +70,26 @@ impl ProposalGenerator for ImprovingGenerator {
     }
 }
 
+/// A generator whose minimum score can only be reached by a suite that saw
+/// the mutation (score 1.0), never by a FAIL verdict on the baseline (0.0).
+struct DemandingGenerator;
+
+impl ProposalGenerator for DemandingGenerator {
+    fn generate(&self, context: &LoopContext) -> Result<MutationProposal, ProposalGenerationError> {
+        Ok(MutationProposal::new(
+            format!("demanding proposal cycle {}", context.cycle),
+            ProposalSource::Scheduled,
+            vec![MutationTarget::FilePath {
+                path: "recipes/search.yaml".to_string(),
+            }],
+            FitnessExpectation {
+                baseline_score: 0.0,
+                minimum_score: 0.9,
+            },
+        ))
+    }
+}
+
 fn stub_fitness_config(log_dir: &Path) -> FitnessConfig {
     FitnessConfig {
         suite: FitnessSuite {
@@ -281,6 +301,58 @@ async fn improving_proposal_solidifies_and_resets_breaker() {
     assert!(
         content.contains("RSI mutation cycle"),
         "the mutation must be applied"
+    );
+}
+
+fn stub_candidate_aware_fitness(log_dir: &Path) -> FitnessConfig {
+    FitnessConfig {
+        suite: FitnessSuite {
+            phases: TestPhases::Basic,
+            depth: TestDepth::Quick,
+        },
+        // PASS only when the working directory already carries the mutation;
+        // an unmutated baseline reports FAIL.
+        command: Some(FitnessCommand {
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "grep -q 'RSI mutation cycle' recipes/search.yaml && echo 'OVERALL RESULT: PASS' || echo 'OVERALL RESULT: FAIL'".to_string(),
+            ],
+        }),
+        self_test_recipe: PathBuf::from("goose-self-test.yaml"),
+        timeout: std::time::Duration::from_secs(10),
+        log_dir: log_dir.to_path_buf(),
+    }
+}
+
+#[tokio::test]
+async fn fitness_scores_the_mutated_candidate_not_the_baseline() {
+    let managed = tempfile::tempdir().unwrap();
+    let snapshot = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    seed_managed_root(managed.path());
+    seed_managed_root(snapshot.path());
+    let baseline = std::fs::read_to_string(snapshot.path().join("recipes/search.yaml")).unwrap();
+
+    let loop_ = EvolutionLoop::new(
+        ApplyConfig::new(managed.path()),
+        stub_candidate_aware_fitness(logs.path()),
+        Arc::new(DemandingGenerator),
+        snapshot.path(),
+    );
+
+    let outcome = loop_.tick().await.unwrap();
+    assert!(
+        outcome.solidified,
+        "the suite only passes on a mutated candidate, so a solidified cycle proves the gate \
+         scored the mutation rather than the baseline snapshot"
+    );
+
+    // The read-only snapshot itself must never be mutated by the evaluation.
+    assert_eq!(
+        std::fs::read_to_string(snapshot.path().join("recipes/search.yaml")).unwrap(),
+        baseline,
+        "fitness evaluation must not write into the workspace snapshot"
     );
 }
 
