@@ -13,6 +13,7 @@ pub mod roam_client;
 pub mod roam_full_bridge;
 #[cfg(feature = "roaming")]
 pub mod roam_proxy;
+pub mod rsi;
 #[cfg(feature = "scheduler")]
 pub mod schedule;
 pub mod session;
