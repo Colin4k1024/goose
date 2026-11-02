@@ -4598,6 +4598,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "goose-rsi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "goose-sdk"
 version = "0.1.0-alpha.13"
 dependencies = [
@@ -11522,6 +11533,7 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
