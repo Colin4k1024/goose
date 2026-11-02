@@ -28,6 +28,7 @@
 //! scope here: this crate defines the contract they must respect.
 
 pub mod apply;
+pub mod evolution;
 pub mod fitness;
 pub mod proposal;
 pub mod state;

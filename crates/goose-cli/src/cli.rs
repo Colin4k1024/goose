@@ -1043,6 +1043,13 @@ enum Command {
         command: GatewayCommand,
     },
 
+    /// Inspect and manage RSI (Recursive Self-Improvement) evolution state
+    #[command(about = "Inspect and manage RSI evolution state")]
+    Rsi {
+        #[command(subcommand)]
+        command: crate::commands::rsi::RsiCommand,
+    },
+
     /// Update the goose CLI version
     #[cfg(feature = "update")]
     #[command(about = "Update the goose CLI version")]
@@ -1409,6 +1416,7 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Session { .. }) => "session",
         Some(Command::Run { .. }) => "run",
         Some(Command::Gateway { .. }) => "gateway",
+        Some(Command::Rsi { .. }) => "rsi",
         #[cfg(feature = "scheduler")]
         Some(Command::Schedule { .. }) => "schedule",
         #[cfg(feature = "update")]
@@ -2931,6 +2939,7 @@ pub async fn cli() -> anyhow::Result<()> {
             .await
         }
         Some(Command::Gateway { command }) => handle_gateway_command(command).await,
+        Some(Command::Rsi { command }) => crate::commands::rsi::handle_rsi_command(&command),
         #[cfg(feature = "scheduler")]
         Some(Command::Schedule { command }) => handle_schedule_command(command).await,
         #[cfg(feature = "update")]

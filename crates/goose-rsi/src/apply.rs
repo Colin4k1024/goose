@@ -74,7 +74,7 @@ impl ApplyConfig {
         }
     }
 
-    fn rsi_dir(&self) -> PathBuf {
+    pub(crate) fn rsi_dir(&self) -> PathBuf {
         self.managed_root.join("rsi")
     }
     fn backups_dir(&self) -> PathBuf {

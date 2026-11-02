@@ -4382,6 +4382,7 @@ dependencies = [
  "goose-mcp",
  "goose-providers",
  "goose-roaming",
+ "goose-rsi",
  "indicatif",
  "libc",
  "ntapi",
