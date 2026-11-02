@@ -48,6 +48,12 @@ pub const DENIED_PATH_PATTERNS: &[&str] = &[
 /// keys not matching any of these patterns are considered non-security keys
 /// and are allowed.
 ///
+/// SECURITY PREMISE: goose config lookups are exact-match and case-sensitive
+/// (`Config::get` uses the literal key), so a casing variant such as
+/// `goose_mode` cannot write the real `GOOSE_MODE` key. If the config layer
+/// ever becomes case-insensitive, this deny list silently opens a bypass and
+/// must be revisited.
+///
 /// Same glob syntax as path patterns, with `.` as the separator.
 pub const DENIED_CONFIG_KEY_PATTERNS: &[&str] = &[
     // runtime mode / permission switches (GOOSE_MODE and permission config)

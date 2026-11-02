@@ -162,9 +162,8 @@ impl ProposalStateMachine {
     }
 
     pub fn state(&self) -> Result<ProposalState, TransitionError> {
-        ProposalState::from_u8(self.state.load(Ordering::Acquire)).ok_or(
-            TransitionError::Corrupted(self.state.load(Ordering::Acquire)),
-        )
+        let raw = self.state.load(Ordering::Acquire);
+        ProposalState::from_u8(raw).ok_or(TransitionError::Corrupted(raw))
     }
 
     /// Runtime transition with atomic compare-and-set semantics:
