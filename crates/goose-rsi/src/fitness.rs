@@ -226,8 +226,6 @@ pub async fn run_fitness(
     let mut report = match tokio::time::timeout(config.timeout, command.output()).await {
         Err(_elapsed) => degraded(
             proposal,
-            false,
-            0.0,
             vec!["timeout".to_string()],
             &raw_log_path,
             started,
@@ -235,8 +233,6 @@ pub async fn run_fitness(
         ),
         Ok(Err(_spawn_failed)) => degraded(
             proposal,
-            false,
-            0.0,
             vec!["spawn-failed".to_string()],
             &raw_log_path,
             started,
@@ -250,8 +246,6 @@ pub async fn run_fitness(
                     let signal = signal_of(&output.status);
                     degraded(
                         proposal,
-                        false,
-                        0.0,
                         vec![format!("crash:{signal}")],
                         &raw_log_path,
                         started,
@@ -261,8 +255,6 @@ pub async fn run_fitness(
                 Some(0) => parse_success(proposal, &stdout, &raw_log_path, started, timestamp),
                 Some(code) => degraded(
                     proposal,
-                    false,
-                    0.0,
                     vec![format!("exit:{code}")],
                     &raw_log_path,
                     started,
@@ -302,8 +294,6 @@ pub async fn run_fitness(
 
 fn degraded(
     proposal: &MutationProposal,
-    passed: bool,
-    score: f64,
     failed_phases: Vec<String>,
     raw_log_path: &Path,
     started: Instant,
@@ -311,8 +301,8 @@ fn degraded(
 ) -> FitnessReport {
     FitnessReport {
         proposal_id: proposal.id.to_string(),
-        passed,
-        score,
+        passed: false,
+        score: 0.0,
         failed_phases,
         duration: started.elapsed(),
         raw_log_ref: raw_log_path.to_path_buf(),
@@ -331,19 +321,15 @@ fn parse_success(
     started: Instant,
     timestamp: SystemTime,
 ) -> FitnessReport {
-    let overall_pass = stdout.contains("OVERALL RESULT: PASS");
-    let overall_fail = stdout.contains("OVERALL RESULT: FAIL");
-    if !overall_pass && !overall_fail {
+    let Some(overall_pass) = overall_verdict(stdout) else {
         return degraded(
             proposal,
-            false,
-            0.0,
             vec!["unparseable-output".to_string()],
             raw_log_path,
             started,
             timestamp,
         );
-    }
+    };
 
     let score = if overall_pass {
         parse_pass_percentage(stdout).unwrap_or(1.0)
@@ -360,6 +346,29 @@ fn parse_success(
         raw_log_ref: raw_log_path.to_path_buf(),
         timestamp,
     }
+}
+
+/// Line-exact verdict detection against the self-test summary contract
+/// (`✅ OVERALL RESULT: PASS`). Fail-closed semantics:
+///
+/// * any line ending in `OVERALL RESULT: FAIL` → `Some(false)`;
+/// * otherwise a line ending in `OVERALL RESULT: PASS` → `Some(true)`;
+/// * otherwise (including substrings like `OVERALL RESULT: PASSED_ANYTHING`)
+///   → `None`.
+fn overall_verdict(stdout: &str) -> Option<bool> {
+    if stdout
+        .lines()
+        .any(|line| line.trim().ends_with("OVERALL RESULT: FAIL"))
+    {
+        return Some(false);
+    }
+    if stdout
+        .lines()
+        .any(|line| line.trim().ends_with("OVERALL RESULT: PASS"))
+    {
+        return Some(true);
+    }
+    None
 }
 
 fn parse_pass_percentage(stdout: &str) -> Option<f64> {
@@ -414,4 +423,50 @@ async fn persist_raw_log(path: &Path, stdout: &str, stderr: &str) -> std::io::Re
     file.write_all(b"\n=== stderr ===\n").await?;
     file.write_all(stderr.as_bytes()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verdict_matching_is_line_exact_and_fail_closed() {
+        assert_eq!(overall_verdict("✅ OVERALL RESULT: PASS\n"), Some(true));
+        assert_eq!(overall_verdict("❌ OVERALL RESULT: FAIL\n"), Some(false));
+        // substrings that merely contain the marker do not count
+        assert_eq!(overall_verdict("OVERALL RESULT: PASSED_ANYTHING"), None);
+        assert_eq!(overall_verdict("OVERALL RESULT: FAILURE_MODE_TEST"), None);
+        assert_eq!(overall_verdict("random noise"), None);
+        assert_eq!(overall_verdict(""), None);
+        // mixed verdicts: any FAIL line wins (fail-closed)
+        assert_eq!(
+            overall_verdict("✅ OVERALL RESULT: PASS\n❌ OVERALL RESULT: FAIL"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn pass_percentage_parses_the_summary_contract() {
+        let output = "📊 Quick Stats:\n• Tests Run: 10\n• Passed: 9 (90%)\n• Failed: 1 (10%)";
+        assert_eq!(parse_pass_percentage(output), Some(0.9));
+        assert_eq!(parse_pass_percentage("• Passed: 10 (100%)"), Some(1.0));
+        assert_eq!(parse_pass_percentage("no stats"), None);
+        // out-of-range percentages are clamped into the score domain
+        assert_eq!(parse_pass_percentage("• Passed: 1 (250%)"), Some(1.0));
+    }
+
+    #[test]
+    fn failed_features_collect_only_cross_marks() {
+        let output = "\
+✅ Working Features:
+• File operations: ✓
+• Shell commands: ✗
+• Extensions: ✗
+• no colon line ✗
+";
+        assert_eq!(
+            parse_failed_features(output),
+            vec!["Shell commands".to_string(), "Extensions".to_string()]
+        );
+    }
 }
