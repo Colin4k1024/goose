@@ -27,11 +27,16 @@
 //! (issue #4) and the evolution log + CLI (issue #5). Those layers are out of
 //! scope here: this crate defines the contract they must respect.
 
+pub mod apply;
 pub mod fitness;
 pub mod proposal;
 pub mod state;
 pub mod whitelist;
 
+pub use apply::{
+    rollback_to_version, Applied, ApplyConfig, ApplyError, Change, Failpoint, RecoveryReport,
+    RolledBack,
+};
 pub use proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
 pub use state::{
     tag, BeginValidationError, ProposalState, ProposalStateMachine, TransitionError,

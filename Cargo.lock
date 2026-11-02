@@ -4601,8 +4601,11 @@ dependencies = [
 name = "goose-rsi"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
