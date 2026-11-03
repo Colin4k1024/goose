@@ -4602,6 +4602,7 @@ dependencies = [
 name = "goose-rsi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fs2",
  "serde",
  "serde_json",

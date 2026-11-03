@@ -16,7 +16,9 @@ use goose_rsi::apply::{
     Failpoint, RecoveryReport,
 };
 use goose_rsi::fitness::FitnessReport;
-use goose_rsi::proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
+use goose_rsi::proposal::{
+    FitnessExpectation, MutationProposal, MutationTarget, PayloadChange, ProposalSource,
+};
 use goose_rsi::whitelist::validate_target;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,11 +28,24 @@ fn proposal_with(targets: Vec<MutationTarget>) -> MutationProposal {
     MutationProposal::new(
         "apply test",
         ProposalSource::Scheduled,
-        targets,
+        targets.clone(),
         FitnessExpectation {
             baseline_score: 0.5,
             minimum_score: 0.5,
         },
+        targets
+            .into_iter()
+            .map(|t| match t {
+                MutationTarget::FilePath { path } => PayloadChange::FileChange {
+                    path,
+                    content: "test content\n".to_string(),
+                },
+                MutationTarget::ConfigKey { key } => PayloadChange::ConfigKeyChange {
+                    key,
+                    value: serde_json::json!("test"),
+                },
+            })
+            .collect(),
     )
 }
 
@@ -284,7 +299,12 @@ fn config_key_changes_round_trip_through_rollback() {
     assert!(updated.contains("GOOSE_TEMPERATURE"));
     assert!(updated.contains("GOOSE_MODEL"), "existing keys survive");
 
-    rollback_to_version(&config, 1).unwrap();
+    let rollback_result = rollback_to_version(&config, 1);
+    assert!(
+        rollback_result.is_ok(),
+        "rollback failed: {:?}",
+        rollback_result.err()
+    );
     assert_eq!(managed_hashes(root.path()), old);
 }
 

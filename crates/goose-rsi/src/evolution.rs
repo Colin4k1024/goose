@@ -26,7 +26,7 @@
 
 use crate::apply::{self, apply, materialize_candidate, recover, ApplyConfig, Change};
 use crate::fitness::{run_fitness, FitnessConfig, FitnessReport};
-use crate::proposal::{MutationProposal, MutationTarget};
+use crate::proposal::{MutationProposal, MutationTarget, PayloadChange};
 use crate::state::{tag, ProposalState, ProposalStateMachine};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -35,8 +35,12 @@ use std::time::SystemTime;
 
 /// Injectable proposal generator: the Detect→Propose step. Production wires
 /// this to an LLM call; tests use a deterministic stub.
+#[async_trait::async_trait]
 pub trait ProposalGenerator: Send + Sync {
-    fn generate(&self, context: &LoopContext) -> Result<MutationProposal, ProposalGenerationError>;
+    async fn generate(
+        &self,
+        context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError>;
 }
 
 /// Why proposal generation failed (non-fatal: the cycle is skipped).
@@ -220,7 +224,7 @@ impl EvolutionLoop {
         cycle: u32,
         context: &LoopContext,
     ) -> Result<CycleOutcome, LoopError> {
-        let proposal = match self.generator.generate(context) {
+        let proposal = match self.generator.generate(context).await {
             Ok(proposal) => proposal,
             Err(ProposalGenerationError::NothingToPropose) => {
                 return Ok(CycleOutcome {
@@ -356,23 +360,21 @@ impl EvolutionLoop {
         }
     }
 
-    /// Produce the change set for a proposal. In production this comes from
-    /// the proposal payload; here a minimal synthesis maps file-path targets
-    /// to a placeholder content (the loop's job is orchestration, not content
-    /// generation — the generator is expected to carry the payload in a
-    /// real integration).
+    /// Convert the proposal's payload into apply-layer `Change` items.
+    /// No content is synthesized at runtime — every byte comes from the
+    /// proposal itself.
     fn synthesize_changes(&self, proposal: &MutationProposal) -> Vec<Change> {
         proposal
-            .targets
+            .payload
             .iter()
-            .map(|target| match target {
-                MutationTarget::FilePath { path } => Change::FileChange {
+            .map(|p| match p {
+                PayloadChange::FileChange { path, content } => Change::FileChange {
                     path: path.clone(),
-                    content: format!("# RSI mutation cycle\n# proposal: {}\n", proposal.id),
+                    content: content.clone(),
                 },
-                MutationTarget::ConfigKey { key } => Change::ConfigKeyChange {
+                PayloadChange::ConfigKeyChange { key, value } => Change::ConfigKeyChange {
                     key: key.clone(),
-                    value: serde_json::json!("rsi-applied"),
+                    value: value.clone(),
                 },
             })
             .collect()
@@ -399,7 +401,7 @@ impl EvolutionLoop {
         Ok(LoopLock { _file: file })
     }
 
-    fn load_breaker(&self) -> CircuitBreaker {
+    pub fn load_breaker(&self) -> CircuitBreaker {
         std::fs::read_to_string(&self.breaker_path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())

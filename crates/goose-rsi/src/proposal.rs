@@ -50,6 +50,22 @@ impl MutationTarget {
     }
 }
 
+/// A single change carried by a proposal's payload. The apply layer converts
+/// these into [`Change`](crate::apply::Change) items — no content is
+/// synthesized at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PayloadChange {
+    FileChange {
+        path: String,
+        content: String,
+    },
+    ConfigKeyChange {
+        key: String,
+        value: serde_json::Value,
+    },
+}
+
 /// A proposed self-modification, validated against the frozen whitelist
 /// before it may advance from `Proposed` to `Validating`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +79,9 @@ pub struct MutationProposal {
     pub targets: Vec<MutationTarget>,
     /// The fitness gate this proposal must clear (issue #2/#3).
     pub fitness: FitnessExpectation,
+    /// The concrete changes this proposal carries. The apply layer consumes
+    /// these verbatim — no runtime synthesis.
+    pub payload: Vec<PayloadChange>,
 }
 
 impl MutationProposal {
@@ -72,6 +91,7 @@ impl MutationProposal {
         source: ProposalSource,
         targets: Vec<MutationTarget>,
         fitness: FitnessExpectation,
+        payload: Vec<PayloadChange>,
     ) -> Self {
         MutationProposal {
             id: Uuid::new_v4(),
@@ -79,6 +99,7 @@ impl MutationProposal {
             source,
             targets,
             fitness,
+            payload,
         }
     }
 
@@ -111,6 +132,10 @@ mod tests {
                 baseline_score: 0.5,
                 minimum_score: 0.5,
             },
+            vec![PayloadChange::FileChange {
+                path: "recipes/search.yaml".to_string(),
+                content: "name: improved-search\n".to_string(),
+            }],
         )
     }
 

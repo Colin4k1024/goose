@@ -2939,7 +2939,7 @@ pub async fn cli() -> anyhow::Result<()> {
             .await
         }
         Some(Command::Gateway { command }) => handle_gateway_command(command).await,
-        Some(Command::Rsi { command }) => crate::commands::rsi::handle_rsi_command(&command),
+        Some(Command::Rsi { command }) => crate::commands::rsi::handle_rsi_command(&command).await,
         #[cfg(feature = "scheduler")]
         Some(Command::Schedule { command }) => handle_schedule_command(command).await,
         #[cfg(feature = "update")]

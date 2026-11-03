@@ -25,6 +25,7 @@ fn proposal() -> MutationProposal {
             baseline_score: 0.5,
             minimum_score: 0.5,
         },
+        vec![],
     )
 }
 
