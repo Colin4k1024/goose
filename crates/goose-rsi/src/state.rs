@@ -186,6 +186,7 @@ impl ProposalStateMachine {
     ///     ProposalSource::Session,
     ///     vec![MutationTarget::FilePath { path: "recipes/a.yaml".into() }],
     ///     FitnessExpectation { baseline_score: 0.5, minimum_score: 0.5 },
+    ///     vec![],
     /// ));
     ///
     /// // Illegal pair: Proposed may only move to Validating.
@@ -231,6 +232,7 @@ impl ProposalStateMachine {
     /// #     ProposalSource::Session,
     /// #     vec![MutationTarget::FilePath { path: "recipes/a.yaml".into() }],
     /// #     FitnessExpectation { baseline_score: 0.5, minimum_score: 0.5 },
+    /// #     vec![],
     /// # ));
     /// assert_eq!(
     ///     machine.transit_typed::<tag::Proposed, tag::Validating>(),
@@ -251,6 +253,7 @@ impl ProposalStateMachine {
     /// #     ProposalSource::Session,
     /// #     vec![MutationTarget::FilePath { path: "recipes/a.yaml".into() }],
     /// #     FitnessExpectation { baseline_score: 0.5, minimum_score: 0.5 },
+    /// #     vec![],
     /// # ));
     /// machine.transit_typed::<tag::Solidified, tag::Proposed>();
     /// ```

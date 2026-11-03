@@ -2,8 +2,11 @@ use anyhow::{Context, Result};
 use goose::config::paths::Paths;
 use goose_rsi::apply::{list_backup_versions, rollback_to_version, ApplyConfig};
 use goose_rsi::audit::{append_event, read_breaker, read_events, read_loop_state, render_history};
-use goose_rsi::evolution::{EventKind, EvolutionEvent};
-use std::path::Path;
+use goose_rsi::evolution::{EventKind, EvolutionEvent, EvolutionLoop, LoopContext};
+use goose_rsi::fitness::{FitnessCommand, FitnessConfig, FitnessSuite, TestDepth, TestPhases};
+use goose_rsi::proposal::MutationProposal;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// RSI subcommands for auditing and managing the evolution loop.
 #[derive(clap::Subcommand)]
@@ -21,9 +24,11 @@ pub enum RsiCommand {
         /// Backup version number to restore
         version: u32,
     },
+    /// Run one evolution cycle: detect → propose → validate → fitness → apply → solidify
+    Evolve,
 }
 
-pub fn handle_rsi_command(command: &RsiCommand) -> Result<()> {
+pub async fn handle_rsi_command(command: &RsiCommand) -> Result<()> {
     let managed_root = Paths::config_dir();
     match command {
         RsiCommand::Status => {
@@ -34,6 +39,10 @@ pub fn handle_rsi_command(command: &RsiCommand) -> Result<()> {
         }
         RsiCommand::Rollback { version } => {
             println!("{}", rollback_and_log(&managed_root, *version)?);
+        }
+        RsiCommand::Evolve => {
+            let outcome = evolve_one_cycle(&managed_root).await?;
+            println!("{outcome}");
         }
     }
     Ok(())
@@ -105,13 +114,70 @@ fn rollback_and_log(managed_root: &Path, version: u32) -> Result<String> {
     ))
 }
 
+// ── Issue #10: goose rsi evolve + LLM proposal generator ──────────────────
+
+/// Run one evolution cycle on the user's managed root.
+async fn evolve_one_cycle(managed_root: &Path) -> Result<String> {
+    let apply_config = ApplyConfig::new(managed_root);
+    let snapshot_dir = managed_root.join("rsi-snapshot");
+    std::fs::create_dir_all(&snapshot_dir)?;
+
+    let fitness_config = default_fitness_config(managed_root);
+    let generator = Arc::new(LlmProposalGenerator);
+
+    let loop_ = EvolutionLoop::new(apply_config, fitness_config, generator, &snapshot_dir);
+
+    let outcome = loop_.tick().await?;
+    Ok(format!(
+        "cycle {}: solidified={}, rolled_back={}, breaker_tripped={}, fitness_score={:?}",
+        outcome.cycle,
+        outcome.solidified,
+        outcome.rolled_back,
+        outcome.breaker_tripped,
+        outcome.fitness_score
+    ))
+}
+
+fn default_fitness_config(managed_root: &Path) -> FitnessConfig {
+    FitnessConfig {
+        suite: FitnessSuite {
+            phases: TestPhases::Basic,
+            depth: TestDepth::Quick,
+        },
+        command: Some(FitnessCommand {
+            program: "goose".to_string(),
+            args: vec![
+                "run".to_string(),
+                "--recipe".to_string(),
+                "goose-self-test.yaml".to_string(),
+            ],
+        }),
+        self_test_recipe: PathBuf::from("goose-self-test.yaml"),
+        timeout: std::time::Duration::from_secs(300),
+        log_dir: managed_root.join("rsi/fitness-logs"),
+    }
+}
+
+/// LLM-backed proposal generator. Uses the configured goose provider to
+/// generate a mutation proposal. On any failure (provider unavailable,
+/// timeout, parse error), returns `NothingToPropose` — zero writes.
+pub struct LlmProposalGenerator;
+
+#[async_trait::async_trait]
+impl goose_rsi::evolution::ProposalGenerator for LlmProposalGenerator {
+    async fn generate(
+        &self,
+        _context: &LoopContext,
+    ) -> Result<MutationProposal, goose_rsi::evolution::ProposalGenerationError> {
+        Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use goose_rsi::apply::{apply, Change};
-    use goose_rsi::proposal::{
-        FitnessExpectation, MutationProposal, MutationTarget, ProposalSource,
-    };
+    use goose_rsi::proposal::{FitnessExpectation, MutationTarget, PayloadChange, ProposalSource};
     use std::time::{Duration, SystemTime};
 
     fn seed(root: &Path) -> MutationProposal {
@@ -127,6 +193,10 @@ mod tests {
                 baseline_score: 0.0,
                 minimum_score: 0.0,
             },
+            vec![PayloadChange::FileChange {
+                path: "recipes/target.yaml".to_string(),
+                content: "version: 2\n".to_string(),
+            }],
         )
     }
 

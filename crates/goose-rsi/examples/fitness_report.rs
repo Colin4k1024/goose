@@ -13,7 +13,9 @@
 use goose_rsi::fitness::{
     run_fitness, FitnessCommand, FitnessConfig, FitnessSuite, TestDepth, TestPhases,
 };
-use goose_rsi::proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
+use goose_rsi::proposal::{
+    FitnessExpectation, MutationProposal, MutationTarget, PayloadChange, ProposalSource,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -71,6 +73,10 @@ fn main() {
                 baseline_score: 0.5,
                 minimum_score: 0.5,
             },
+            vec![PayloadChange::FileChange {
+                path: "recipes/search.yaml".to_string(),
+                content: "# evidence run\n".to_string(),
+            }],
         ),
         &workspace,
     ));

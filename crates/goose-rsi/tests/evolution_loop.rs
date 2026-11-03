@@ -10,7 +10,9 @@ use goose_rsi::evolution::{
     ProposalGenerator,
 };
 use goose_rsi::fitness::{FitnessCommand, FitnessConfig, FitnessSuite, TestDepth, TestPhases};
-use goose_rsi::proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
+use goose_rsi::proposal::{
+    FitnessExpectation, MutationProposal, MutationTarget, PayloadChange, ProposalSource,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -31,8 +33,12 @@ impl RegressingGenerator {
     }
 }
 
+#[async_trait::async_trait]
 impl ProposalGenerator for RegressingGenerator {
-    fn generate(&self, context: &LoopContext) -> Result<MutationProposal, ProposalGenerationError> {
+    async fn generate(
+        &self,
+        context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(MutationProposal::new(
             format!("regressing proposal cycle {}", context.cycle),
@@ -42,10 +48,12 @@ impl ProposalGenerator for RegressingGenerator {
             }],
             FitnessExpectation {
                 baseline_score: 0.5,
-                // The stub suite always reports score 0.0, so this minimum
-                // (0.5) is never met → fitness gate always refuses.
                 minimum_score: 0.5,
             },
+            vec![PayloadChange::FileChange {
+                path: "recipes/search.yaml".to_string(),
+                content: "# regressing\n".to_string(),
+            }],
         ))
     }
 }
@@ -54,8 +62,12 @@ impl ProposalGenerator for RegressingGenerator {
 /// so the fitness gate always passes (score 0.0 >= 0.0).
 struct ImprovingGenerator;
 
+#[async_trait::async_trait]
 impl ProposalGenerator for ImprovingGenerator {
-    fn generate(&self, context: &LoopContext) -> Result<MutationProposal, ProposalGenerationError> {
+    async fn generate(
+        &self,
+        context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError> {
         Ok(MutationProposal::new(
             format!("improving proposal cycle {}", context.cycle),
             ProposalSource::Scheduled,
@@ -66,6 +78,10 @@ impl ProposalGenerator for ImprovingGenerator {
                 baseline_score: 0.0,
                 minimum_score: 0.0,
             },
+            vec![PayloadChange::FileChange {
+                path: "recipes/search.yaml".to_string(),
+                content: "# RSI mutation cycle\n".to_string(),
+            }],
         ))
     }
 }
@@ -74,8 +90,12 @@ impl ProposalGenerator for ImprovingGenerator {
 /// the mutation (score 1.0), never by a FAIL verdict on the baseline (0.0).
 struct DemandingGenerator;
 
+#[async_trait::async_trait]
 impl ProposalGenerator for DemandingGenerator {
-    fn generate(&self, context: &LoopContext) -> Result<MutationProposal, ProposalGenerationError> {
+    async fn generate(
+        &self,
+        context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError> {
         Ok(MutationProposal::new(
             format!("demanding proposal cycle {}", context.cycle),
             ProposalSource::Scheduled,
@@ -86,6 +106,10 @@ impl ProposalGenerator for DemandingGenerator {
                 baseline_score: 0.0,
                 minimum_score: 0.9,
             },
+            vec![PayloadChange::FileChange {
+                path: "recipes/search.yaml".to_string(),
+                content: "# RSI mutation cycle\n".to_string(),
+            }],
         ))
     }
 }
@@ -131,6 +155,40 @@ fn seed_managed_root(root: &Path) {
         "version: 1.0\ntitle: baseline\n",
     )
     .unwrap();
+}
+
+fn managed_hashes(root: &Path) -> std::collections::BTreeMap<String, String> {
+    use sha2::{Digest, Sha256};
+    fn visit(path: &Path, prefix: String, out: &mut std::collections::BTreeMap<String, String>) {
+        if path.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                let name = entry.file_name().unwrap().to_string_lossy().into_owned();
+                let full = format!("{prefix}/{name}");
+                if full == "/rsi" || full == "/rsi-snapshot" {
+                    continue;
+                }
+                visit(&entry, full, out);
+            }
+            return;
+        }
+        let content = std::fs::read(path).unwrap();
+        let hash = {
+            let digest = Sha256::digest(&content);
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        out.insert(prefix, hash);
+    }
+    let mut out = std::collections::BTreeMap::new();
+    visit(root, String::new(), &mut out);
+    out
 }
 
 fn managed_recipe_hash(root: &Path) -> String {
@@ -441,4 +499,192 @@ fn evolution_log_is_append_only_jsonl() {
     for line in &lines {
         let _: EvolutionEvent = serde_json::from_str(line).expect("each line must be valid JSON");
     }
+}
+
+// ── Issue #10 tests: payload pass-through, NothingToPropose, failure ──────
+
+/// A generator that always returns NothingToPropose.
+struct EmptyGenerator;
+
+#[async_trait::async_trait]
+impl ProposalGenerator for EmptyGenerator {
+    async fn generate(
+        &self,
+        _context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError> {
+        Err(ProposalGenerationError::NothingToPropose)
+    }
+}
+
+/// A generator that simulates provider failure.
+struct FailingGenerator;
+
+#[async_trait::async_trait]
+impl ProposalGenerator for FailingGenerator {
+    async fn generate(
+        &self,
+        _context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError> {
+        Err(ProposalGenerationError::Failed(
+            "provider unavailable".to_string(),
+        ))
+    }
+}
+
+/// A generator that proposes a deny-listed target (secrets.yaml).
+struct DeniedTargetGenerator;
+
+#[async_trait::async_trait]
+impl ProposalGenerator for DeniedTargetGenerator {
+    async fn generate(
+        &self,
+        context: &LoopContext,
+    ) -> Result<MutationProposal, ProposalGenerationError> {
+        Ok(MutationProposal::new(
+            format!("denied target cycle {}", context.cycle),
+            ProposalSource::Scheduled,
+            vec![MutationTarget::FilePath {
+                path: "secrets.yaml".to_string(),
+            }],
+            FitnessExpectation {
+                baseline_score: 0.0,
+                minimum_score: 0.0,
+            },
+            vec![PayloadChange::FileChange {
+                path: "secrets.yaml".to_string(),
+                content: "stolen\n".to_string(),
+            }],
+        ))
+    }
+}
+
+#[tokio::test]
+async fn nothing_to_propose_produces_zero_writes() {
+    let managed = tempfile::tempdir().unwrap();
+    let snapshot = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    seed_managed_root(managed.path());
+    seed_managed_root(snapshot.path());
+
+    let baseline = managed_hashes(managed.path());
+
+    let loop_ = EvolutionLoop::new(
+        ApplyConfig::new(managed.path()),
+        stub_fitness_config(logs.path()),
+        Arc::new(EmptyGenerator),
+        snapshot.path(),
+    );
+
+    let outcome = loop_.tick().await.unwrap();
+    assert!(!outcome.solidified);
+    assert!(!outcome.rolled_back);
+    assert!(outcome.fitness_score.is_none());
+
+    assert_eq!(
+        managed_hashes(managed.path()),
+        baseline,
+        "nothing_to_propose must not write anything"
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_does_not_panic_or_trip_breaker() {
+    let managed = tempfile::tempdir().unwrap();
+    let snapshot = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    seed_managed_root(managed.path());
+    seed_managed_root(snapshot.path());
+
+    let baseline = managed_hashes(managed.path());
+
+    let loop_ = EvolutionLoop::new(
+        ApplyConfig::new(managed.path()),
+        stub_fitness_config(logs.path()),
+        Arc::new(FailingGenerator),
+        snapshot.path(),
+    );
+
+    // tick should return an error (not panic)
+    let result = loop_.tick().await;
+    assert!(
+        result.is_err(),
+        "provider failure must return Err, not panic"
+    );
+
+    // Breaker must not have tripped from a generation failure
+    let breaker = loop_.load_breaker();
+    assert!(
+        !breaker.paused,
+        "generation failure must not trip the breaker"
+    );
+
+    assert_eq!(
+        managed_hashes(managed.path()),
+        baseline,
+        "provider failure must not write anything"
+    );
+}
+
+#[tokio::test]
+async fn denied_target_is_rejected_with_zero_writes() {
+    let managed = tempfile::tempdir().unwrap();
+    let snapshot = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    seed_managed_root(managed.path());
+    seed_managed_root(snapshot.path());
+
+    let baseline = managed_hashes(managed.path());
+
+    let loop_ = EvolutionLoop::new(
+        ApplyConfig::new(managed.path()),
+        stub_fitness_config(logs.path()),
+        Arc::new(DeniedTargetGenerator),
+        snapshot.path(),
+    );
+
+    let result = loop_.tick().await;
+    assert!(
+        result.is_err(),
+        "whitelist rejection must return Err, not silently proceed"
+    );
+
+    assert_eq!(
+        managed_hashes(managed.path()),
+        baseline,
+        "denied target must not write anything"
+    );
+}
+
+#[tokio::test]
+async fn payload_passes_through_verbatim_to_apply() {
+    let managed = tempfile::tempdir().unwrap();
+    let snapshot = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    seed_managed_root(managed.path());
+    seed_managed_root(snapshot.path());
+
+    let expected_content = "name: verbatim-payload-test\nversion: 42\n";
+
+    let loop_ = EvolutionLoop::new(
+        ApplyConfig::new(managed.path()),
+        stub_passing_fitness_config(logs.path()),
+        Arc::new(DemandingGenerator),
+        snapshot.path(),
+    );
+
+    let outcome = loop_.tick().await.unwrap();
+    assert!(outcome.solidified, "proposal must solidify");
+
+    let applied = std::fs::read_to_string(managed.path().join("recipes/search.yaml")).unwrap();
+    assert_eq!(
+        applied, "# RSI mutation cycle\n",
+        "applied content must match proposal payload byte-for-byte"
+    );
+    assert!(
+        !applied.contains("RSI mutation cycle\n# proposal:"),
+        "no placeholder synthesis must appear"
+    );
+
+    // Verify the DemandingGenerator's payload is exactly what landed on disk
+    let _ = expected_content; // content comes from generator's PayloadChange
 }

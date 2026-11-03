@@ -20,6 +20,7 @@ fn machine() -> ProposalStateMachine {
             baseline_score: 0.5,
             minimum_score: 0.6,
         },
+        vec![],
     ))
 }
 
@@ -162,6 +163,7 @@ fn begin_validation_moves_only_valid_proposals() {
             baseline_score: 0.5,
             minimum_score: 0.5,
         },
+        vec![],
     ));
     let error = machine
         .begin_validation()

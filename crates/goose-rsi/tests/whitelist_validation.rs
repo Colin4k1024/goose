@@ -17,6 +17,7 @@ fn proposal_with(targets: Vec<MutationTarget>) -> MutationProposal {
             baseline_score: 0.5,
             minimum_score: 0.5,
         },
+        vec![],
     )
 }
 
