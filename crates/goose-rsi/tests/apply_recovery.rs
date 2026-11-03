@@ -299,7 +299,12 @@ fn config_key_changes_round_trip_through_rollback() {
     assert!(updated.contains("GOOSE_TEMPERATURE"));
     assert!(updated.contains("GOOSE_MODEL"), "existing keys survive");
 
-    rollback_to_version(&config, 1).unwrap();
+    let rollback_result = rollback_to_version(&config, 1);
+    assert!(
+        rollback_result.is_ok(),
+        "rollback failed: {:?}",
+        rollback_result.err()
+    );
     assert_eq!(managed_hashes(root.path()), old);
 }
 
