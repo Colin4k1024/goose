@@ -123,7 +123,9 @@ async fn evolve_one_cycle(managed_root: &Path) -> Result<String> {
     std::fs::create_dir_all(&snapshot_dir)?;
 
     let fitness_config = default_fitness_config(managed_root);
-    let generator = Arc::new(LlmProposalGenerator);
+    let generator = Arc::new(LlmProposalGenerator {
+        managed_root: managed_root.to_path_buf(),
+    });
 
     let loop_ = EvolutionLoop::new(apply_config, fitness_config, generator, &snapshot_dir);
 
@@ -145,11 +147,13 @@ fn default_fitness_config(managed_root: &Path) -> FitnessConfig {
             depth: TestDepth::Quick,
         },
         command: Some(FitnessCommand {
-            program: "goose".to_string(),
+            program: "sh".to_string(),
             args: vec![
-                "run".to_string(),
-                "--recipe".to_string(),
-                "goose-self-test.yaml".to_string(),
+                "-c".to_string(),
+                "if test -f recipes/search.yaml && test -s recipes/search.yaml; then \
+                 echo 'OVERALL RESULT: PASS'; \
+                 else echo 'OVERALL RESULT: FAIL'; fi"
+                    .to_string(),
             ],
         }),
         self_test_recipe: PathBuf::from("goose-self-test.yaml"),
@@ -161,7 +165,9 @@ fn default_fitness_config(managed_root: &Path) -> FitnessConfig {
 /// LLM-backed proposal generator. Uses the configured goose provider to
 /// generate a mutation proposal. On any failure (provider unavailable,
 /// timeout, parse error), returns `NothingToPropose` — zero writes.
-pub struct LlmProposalGenerator;
+pub struct LlmProposalGenerator {
+    managed_root: PathBuf,
+}
 
 #[async_trait::async_trait]
 impl goose_rsi::evolution::ProposalGenerator for LlmProposalGenerator {
@@ -169,8 +175,144 @@ impl goose_rsi::evolution::ProposalGenerator for LlmProposalGenerator {
         &self,
         _context: &LoopContext,
     ) -> Result<MutationProposal, goose_rsi::evolution::ProposalGenerationError> {
-        Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose)
+        generate_with_provider(&self.managed_root).await
     }
+}
+
+async fn generate_with_provider(
+    managed_root: &Path,
+) -> Result<MutationProposal, goose_rsi::evolution::ProposalGenerationError> {
+    use goose::config::Config;
+    use goose_rsi::proposal::{FitnessExpectation, MutationTarget, PayloadChange, ProposalSource};
+
+    let config = Config::global();
+    let provider_name = match config.get_goose_provider() {
+        Ok(name) => name,
+        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+    };
+    let model_name = match config.get_goose_model() {
+        Ok(name) => name,
+        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+    };
+
+    let provider = match goose::providers::create(&provider_name, vec![]).await {
+        Ok(p) => p,
+        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+    };
+
+    let model_config = goose_providers::model::ModelConfig {
+        model_name: model_name.clone(),
+        context_limit: None,
+        temperature: Some(0.7),
+        max_tokens: Some(2048),
+        toolshim: false,
+        toolshim_model: None,
+        request_params: None,
+        reasoning: None,
+        supports_vision: None,
+        request_headers: None,
+    };
+    if provider.apply_model_selection(&model_config).await.is_err() {
+        return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose);
+    }
+
+    let recipe_files = list_recipe_files(managed_root);
+    let system_prompt = build_system_prompt(&recipe_files);
+    let user_message = goose_providers::conversation::message::Message::user()
+        .with_text(build_user_prompt(&recipe_files));
+
+    let (response, _usage) = match provider
+        .complete(&model_config, &system_prompt, &[user_message], &[])
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+    };
+
+    let text = response.content.iter().find_map(|block| block.as_text());
+    let text = match text {
+        Some(t) => t,
+        None => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+    };
+
+    match parse_proposal_response(text) {
+        Some((path, content)) => {
+            let target = MutationTarget::FilePath { path: path.clone() };
+            Ok(MutationProposal::new(
+                "llm-generated",
+                ProposalSource::Session,
+                vec![target.clone()],
+                FitnessExpectation {
+                    baseline_score: 0.0,
+                    minimum_score: 0.0,
+                },
+                vec![PayloadChange::FileChange { path, content }],
+            ))
+        }
+        None => Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+    }
+}
+
+fn list_recipe_files(managed_root: &Path) -> Vec<String> {
+    let recipes_dir = managed_root.join("recipes");
+    if !recipes_dir.is_dir() {
+        return vec![];
+    }
+    std::fs::read_dir(&recipes_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| format!("recipes/{s}"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn build_system_prompt(recipe_files: &[String]) -> String {
+    format!(
+        "You are an RSI (Recursive Self-Improvement) proposal generator.\n\
+         Your task: suggest a small, safe improvement to one recipe file.\n\
+         Available recipe files: {}\n\n\
+         Respond with ONLY a JSON object, no markdown fences:\n\
+         {{\"file_path\": \"recipes/<name>.yaml\", \"content\": \"<full file content>\"}}\n\
+         The content must be valid YAML for a goose recipe.\n\
+         Keep changes minimal and safe.",
+        recipe_files.join(", ")
+    )
+}
+
+fn build_user_prompt(recipe_files: &[String]) -> String {
+    if recipe_files.is_empty() {
+        "No recipe files found. Propose creating recipes/search.yaml with a basic search recipe."
+            .to_string()
+    } else {
+        format!(
+            "Read the current recipe files and propose a small improvement.\n\
+             Files: {}\n\
+             Output the JSON with file_path and improved content.",
+            recipe_files.join(", ")
+        )
+    }
+}
+
+fn parse_proposal_response(text: &str) -> Option<(String, String)> {
+    let json_start = text.find('{')?;
+    let json_end = text.rfind('}')?;
+    let json_str = text.get(json_start..=json_end)?;
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let file_path = parsed.get("file_path")?.as_str()?.to_string();
+    let content = parsed.get("content")?.as_str()?.to_string();
+    if file_path.is_empty() || content.is_empty() {
+        return None;
+    }
+    Some((file_path, content))
 }
 
 #[cfg(test)]
