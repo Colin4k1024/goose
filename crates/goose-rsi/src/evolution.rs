@@ -347,8 +347,13 @@ impl EvolutionLoop {
         let root =
             std::env::temp_dir().join(format!("goose-rsi-candidate-{}", uuid::Uuid::new_v4()));
         copy_tree(&self.workspace_snapshot, &root)?;
-        materialize_candidate(&root, changes)?;
-        Ok(CandidateSnapshot { root })
+        match materialize_candidate(&root, changes) {
+            Ok(()) => Ok(CandidateSnapshot { root }),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&root);
+                Err(e.into())
+            }
+        }
     }
 
     /// Produce the change set for a proposal. In production this comes from
