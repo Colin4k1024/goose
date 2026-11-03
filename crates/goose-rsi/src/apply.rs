@@ -507,6 +507,25 @@ fn commit_planned(
     Ok(())
 }
 
+/// Materialize a change set into `dest_root`, a throwaway candidate copy.
+///
+/// This is the evaluation scratch path: no backup, no journal, no lock — the
+/// destination is not the managed root. Paths are consumed verbatim exactly
+/// like [`apply`], so the candidate a fitness suite scores is byte-identical
+/// to what [`apply`] would commit after the gate passes.
+pub fn materialize_candidate(dest_root: &Path, changes: &[Change]) -> Result<(), ApplyError> {
+    let config = ApplyConfig::new(dest_root);
+    let planned = planned_writes(&config, changes)?;
+    for write in &planned {
+        let target = dest_root.join(&write.relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, write.content.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn verify_planned_hashes(config: &ApplyConfig, planned: &[PlannedWrite]) -> Result<(), ApplyError> {
     for write in planned {
         let target = config.managed_root.join(&write.relative);

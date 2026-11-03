@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use goose::config::paths::Paths;
 use goose_rsi::apply::{list_backup_versions, rollback_to_version, ApplyConfig};
+use goose_rsi::audit::{append_event, read_breaker, read_events, read_loop_state, render_history};
 use goose_rsi::evolution::{EventKind, EvolutionEvent};
-use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 /// RSI subcommands for auditing and managing the evolution loop.
 #[derive(clap::Subcommand)]
@@ -25,197 +26,176 @@ pub enum RsiCommand {
 pub fn handle_rsi_command(command: &RsiCommand) -> Result<()> {
     let managed_root = Paths::config_dir();
     match command {
-        RsiCommand::Status => handle_rsi_status(&managed_root),
-        RsiCommand::History { limit } => handle_rsi_history(&managed_root, *limit),
-        RsiCommand::Rollback { version } => handle_rsi_rollback(&managed_root, *version),
+        RsiCommand::Status => {
+            println!("{}", status_report(&managed_root));
+        }
+        RsiCommand::History { limit } => {
+            println!("{}", history_report(&managed_root, *limit));
+        }
+        RsiCommand::Rollback { version } => {
+            println!("{}", rollback_and_log(&managed_root, *version)?);
+        }
     }
+    Ok(())
 }
 
-fn handle_rsi_status(managed_root: &std::path::Path) -> Result<()> {
+fn status_report(managed_root: &Path) -> String {
     let rsi_dir = managed_root.join("rsi");
     let apply_config = ApplyConfig::new(managed_root);
 
     let breaker = read_breaker(&rsi_dir);
-    let loop_state = read_loop_state(&rsi_dir);
+    let snapshot = read_loop_state(&rsi_dir);
     let backups = list_backup_versions(&apply_config);
+    let event_count = read_events(&rsi_dir.join("evolution.jsonl")).len();
 
-    println!("RSI Status");
-    println!("──────────────────────────────────────");
-    println!("  Managed root:  {}", managed_root.display());
-    println!(
-        "  Circuit breaker: {} (consecutive failures: {})",
+    let mut report = String::from("RSI Status\n──────────────────────────────────────\n");
+    report.push_str(&format!("  Managed root:  {}\n", managed_root.display()));
+    report.push_str(&format!(
+        "  Circuit breaker: {} (consecutive failures: {})\n",
         if breaker.paused { "PAUSED" } else { "healthy" },
         breaker.consecutive_failures
-    );
-    println!("  Cycle count:   {}", loop_state.0);
-    if let Some(score) = loop_state.1 {
-        println!("  Last fitness:  {:.4}", score);
-    } else {
-        println!("  Last fitness:  (none)");
+    ));
+    report.push_str(&format!("  Cycle count:   {}\n", snapshot.cycle));
+    match snapshot.last_fitness {
+        Some(score) => report.push_str(&format!("  Last fitness:  {score:.4}\n")),
+        None => report.push_str("  Last fitness:  (none)\n"),
     }
     if backups.is_empty() {
-        println!("  Backups:       (none)");
+        report.push_str("  Backups:       (none)\n");
     } else {
-        println!("  Backups:       {:?}", backups);
+        report.push_str(&format!("  Backups:       {backups:?}\n"));
     }
-
-    let log_path = rsi_dir.join("evolution.jsonl");
-    if log_path.exists() {
-        let count = count_log_events(&log_path);
-        println!("  Events logged: {}", count);
-    } else {
-        println!("  Events logged: 0 (no log file)");
-    }
-
-    Ok(())
+    report.push_str(&format!("  Events logged: {event_count}"));
+    report
 }
 
-fn handle_rsi_history(managed_root: &std::path::Path, limit: usize) -> Result<()> {
+fn history_report(managed_root: &Path, limit: usize) -> String {
     let log_path = managed_root.join("rsi/evolution.jsonl");
     if !log_path.exists() {
-        println!("No evolution log found at {}", log_path.display());
-        return Ok(());
+        return format!("No evolution log found at {}", log_path.display());
     }
-
-    let events = read_events_graceful(&log_path);
+    let events = read_events(&log_path);
     if events.is_empty() {
-        println!("Evolution log is empty or unreadable.");
-        return Ok(());
+        return "Evolution log is empty or unreadable.".to_string();
     }
-
-    let start = events.len().saturating_sub(limit);
-    for event in events[start..].iter().rev() {
-        print_event(event);
-    }
-
-    Ok(())
+    render_history(&events, limit)
 }
 
-fn handle_rsi_rollback(managed_root: &std::path::Path, version: u32) -> Result<()> {
+fn rollback_and_log(managed_root: &Path, version: u32) -> Result<String> {
     let apply_config = ApplyConfig::new(managed_root);
-
     let rolled = rollback_to_version(&apply_config, version)
-        .with_context(|| format!("rollback to version {} failed", version))?;
+        .with_context(|| format!("rollback to version {version} failed"))?;
 
-    println!(
+    append_event(
+        &managed_root.join("rsi/evolution.jsonl"),
+        &EvolutionEvent {
+            cycle: 0,
+            timestamp: std::time::SystemTime::now(),
+            proposal_id: String::new(),
+            kind: EventKind::RolledBack {
+                reason: format!("manual rollback to version {version}"),
+            },
+        },
+    )?;
+
+    Ok(format!(
         "Rolled back managed root to backup version {} (restored {} targets).",
         rolled.backup_version,
         rolled.restored_targets.len()
-    );
-
-    let log_path = managed_root.join("rsi/evolution.jsonl");
-    append_rolled_back_event(&log_path, version)?;
-
-    Ok(())
+    ))
 }
 
-fn append_rolled_back_event(log_path: &std::path::Path, version: u32) -> Result<()> {
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use goose_rsi::apply::{apply, Change};
+    use goose_rsi::proposal::{
+        FitnessExpectation, MutationProposal, MutationTarget, ProposalSource,
+    };
+    use std::time::{Duration, SystemTime};
+
+    fn seed(root: &Path) -> MutationProposal {
+        std::fs::create_dir_all(root.join("recipes")).unwrap();
+        std::fs::write(root.join("recipes/target.yaml"), "version: 1\n").unwrap();
+        MutationProposal::new(
+            "cli test",
+            ProposalSource::Scheduled,
+            vec![MutationTarget::FilePath {
+                path: "recipes/target.yaml".to_string(),
+            }],
+            FitnessExpectation {
+                baseline_score: 0.0,
+                minimum_score: 0.0,
+            },
+        )
     }
-    let event = EvolutionEvent {
-        cycle: 0,
-        timestamp: std::time::SystemTime::now(),
-        proposal_id: String::new(),
-        kind: EventKind::RolledBack {
-            reason: format!("manual rollback to version {}", version),
-        },
-    };
-    let mut line = serde_json::to_string(&event)?;
-    line.push('\n');
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
-}
 
-fn print_event(event: &EvolutionEvent) {
-    let kind_str = match &event.kind {
-        EventKind::Proposed { targets } => {
-            format!("Proposed (targets: {})", targets.join(", "))
+    fn passing_report(proposal: &MutationProposal) -> goose_rsi::fitness::FitnessReport {
+        goose_rsi::fitness::FitnessReport {
+            proposal_id: proposal.id.to_string(),
+            passed: true,
+            score: 1.0,
+            failed_phases: Vec::new(),
+            duration: Duration::from_millis(1),
+            raw_log_ref: std::path::PathBuf::from("/dev/null"),
+            timestamp: SystemTime::UNIX_EPOCH,
         }
-        EventKind::Validated => "Validated".to_string(),
-        EventKind::FitnessEvaluated { report } => {
+    }
+
+    #[test]
+    fn history_reports_truncated_log_gracefully() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("rsi/evolution.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "{\"cycle\": 1, \"broken").unwrap();
+        assert_eq!(
+            history_report(root.path(), 10),
+            "Evolution log is empty or unreadable."
+        );
+        assert_eq!(
+            history_report(&root.path().join("missing"), 10),
             format!(
-                "FitnessEvaluated (score: {:.4}, passed: {})",
-                report.score, report.passed
+                "No evolution log found at {}",
+                root.path().join("missing/rsi/evolution.jsonl").display()
             )
-        }
-        EventKind::Applied { backup_version } => {
-            format!("Applied (backup v{})", backup_version)
-        }
-        EventKind::Solidified => "Solidified".to_string(),
-        EventKind::RolledBack { reason } => {
-            format!("RolledBack ({})", reason)
-        }
-        EventKind::BreakerTripped {
-            consecutive_failures,
-        } => {
-            format!("BreakerTripped (failures: {})", consecutive_failures)
-        }
-        EventKind::SkippedConcurrent => "SkippedConcurrent".to_string(),
-        EventKind::SkippedPaused => "SkippedPaused".to_string(),
-    };
-    println!(
-        "  [cycle {}] {} — {}",
-        event.cycle, event.proposal_id, kind_str
-    );
-}
+        );
+    }
 
-struct BreakerStatus {
-    paused: bool,
-    consecutive_failures: u32,
-}
+    #[test]
+    fn rollback_restores_and_appends_rolled_back_event() {
+        let root = tempfile::tempdir().unwrap();
+        let proposal = seed(root.path());
+        let config = ApplyConfig::new(root.path());
+        apply(
+            &config,
+            &proposal,
+            &passing_report(&proposal),
+            &[Change::FileChange {
+                path: "recipes/target.yaml".to_string(),
+                content: "version: 2\n".to_string(),
+            }],
+            None,
+        )
+        .unwrap();
 
-fn read_breaker(rsi_dir: &std::path::Path) -> BreakerStatus {
-    let path = rsi_dir.join("circuit-breaker.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .map(|v| BreakerStatus {
-            paused: v.get("paused").and_then(|p| p.as_bool()).unwrap_or(false),
-            consecutive_failures: v
-                .get("consecutive_failures")
-                .and_then(|f| f.as_u64())
-                .unwrap_or(0) as u32,
-        })
-        .unwrap_or(BreakerStatus {
-            paused: false,
-            consecutive_failures: 0,
-        })
-}
+        let output = rollback_and_log(root.path(), 1).unwrap();
+        assert!(output.contains("backup version 1"));
 
-fn read_loop_state(rsi_dir: &std::path::Path) -> (u32, Option<f64>) {
-    let path = rsi_dir.join("loop-state.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .map(|v| {
-            let cycle = v.get("cycle").and_then(|c| c.as_u64()).unwrap_or(0) as u32;
-            let fitness = v.get("last_fitness").and_then(|f| f.as_f64());
-            (cycle, fitness)
-        })
-        .unwrap_or((0, None))
-}
+        let events = read_events(&root.path().join("rsi/evolution.jsonl"));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, EventKind::RolledBack { .. }));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("recipes/target.yaml")).unwrap(),
+            "version: 1\n"
+        );
+    }
 
-fn count_log_events(log_path: &std::path::Path) -> usize {
-    read_events_graceful(log_path).len()
-}
-
-/// Read events from the JSONL log, skipping any corrupt or truncated lines.
-fn read_events_graceful(log_path: &std::path::Path) -> Vec<EvolutionEvent> {
-    let file = match std::fs::File::open(log_path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-    let reader = BufReader::new(file);
-    reader
-        .lines()
-        .map_while(std::result::Result::ok)
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<EvolutionEvent>(&line).ok())
-        .collect()
+    #[test]
+    fn status_reports_healthy_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let report = status_report(root.path());
+        assert!(report.contains("healthy"));
+        assert!(report.contains("(none)"));
+        assert!(report.contains("Cycle count:   0"));
+    }
 }

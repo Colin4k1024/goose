@@ -1,4 +1,7 @@
-//! RSI audit CLI acceptance tests (issue #5).
+//! RSI audit acceptance tests (issue #5).
+//!
+//! These tests exercise the production reader/writer in `goose_rsi::audit`,
+//! the same code `goose rsi history|rollback` runs.
 //!
 //! Data invariants:
 //!
@@ -8,6 +11,7 @@
 //! 3. A corrupt/truncated log file degrades gracefully — no panic.
 
 use goose_rsi::apply::{apply, rollback_to_version, ApplyConfig, Change};
+use goose_rsi::audit::{append_event, read_events, render_history};
 use goose_rsi::evolution::{EventKind, EvolutionEvent};
 use goose_rsi::fitness::FitnessReport;
 use goose_rsi::proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
@@ -50,39 +54,11 @@ fn seed(root: &Path) {
     .unwrap();
 }
 
-fn write_event(log_path: &Path, event: &EvolutionEvent) {
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    let mut line = serde_json::to_string(event).unwrap();
-    line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .unwrap();
-    file.write_all(line.as_bytes()).unwrap();
-}
-
-fn read_events(log_path: &Path) -> Vec<EvolutionEvent> {
-    use std::io::{BufRead, BufReader};
-    let file = match std::fs::File::open(log_path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    BufReader::new(file)
-        .lines()
-        .map_while(std::result::Result::ok)
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<EvolutionEvent>(&line).ok())
-        .collect()
-}
-
 fn make_event(cycle: u32, kind: EventKind) -> EvolutionEvent {
     EvolutionEvent {
         cycle,
         timestamp: SystemTime::UNIX_EPOCH,
-        proposal_id: format!("prop-{}", cycle),
+        proposal_id: format!("prop-{cycle}"),
         kind,
     }
 }
@@ -92,8 +68,8 @@ fn truncated_last_line_is_skipped_without_losing_earlier_events() {
     let root = tempfile::tempdir().unwrap();
     let log_path = root.path().join("rsi/evolution.jsonl");
 
-    // Write 3 valid events.
-    write_event(
+    // Production writer: three valid events.
+    append_event(
         &log_path,
         &make_event(
             1,
@@ -101,18 +77,21 @@ fn truncated_last_line_is_skipped_without_losing_earlier_events() {
                 targets: vec!["a".into()],
             },
         ),
-    );
-    write_event(&log_path, &make_event(1, EventKind::Validated));
-    write_event(&log_path, &make_event(1, EventKind::Solidified));
+    )
+    .unwrap();
+    append_event(&log_path, &make_event(1, EventKind::Validated)).unwrap();
+    append_event(&log_path, &make_event(1, EventKind::Solidified)).unwrap();
 
-    // Append a truncated (incomplete) JSON line.
+    // Crash artifact: a truncated (incomplete) JSON line.
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&log_path)
         .unwrap();
     file.write_all(b"{\"cycle\": 2, \"incomplete\": tru")
         .unwrap();
+    drop(file);
 
+    // Production reader must skip the truncated line.
     let events = read_events(&log_path);
     assert_eq!(events.len(), 3, "the truncated line must be skipped");
     assert!(events.iter().all(|e| e.cycle == 1));
@@ -125,9 +104,8 @@ fn fully_corrupt_log_degrades_to_empty() {
     std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
     std::fs::write(&log_path, "not json at all\n{also broken\n").unwrap();
 
-    let events = read_events(&log_path);
     assert!(
-        events.is_empty(),
+        read_events(&log_path).is_empty(),
         "a fully corrupt log must degrade to empty"
     );
 }
@@ -137,17 +115,18 @@ fn mixed_valid_and_corrupt_lines_preserve_valid_ones() {
     let root = tempfile::tempdir().unwrap();
     let log_path = root.path().join("rsi/evolution.jsonl");
 
-    write_event(
+    append_event(
         &log_path,
         &make_event(1, EventKind::Proposed { targets: vec![] }),
-    );
+    )
+    .unwrap();
     std::fs::OpenOptions::new()
         .append(true)
         .open(&log_path)
         .unwrap()
         .write_all(b"corrupt line\n")
         .unwrap();
-    write_event(&log_path, &make_event(2, EventKind::Solidified));
+    append_event(&log_path, &make_event(2, EventKind::Solidified)).unwrap();
 
     let events = read_events(&log_path);
     assert_eq!(
@@ -180,38 +159,41 @@ fn rollback_appends_rolled_back_event_to_log() {
     )
     .unwrap();
 
-    // Write a Solidified event before rollback.
-    write_event(
+    append_event(
         &log_path,
         &make_event(1, EventKind::Applied { backup_version: 1 }),
-    );
+    )
+    .unwrap();
 
-    // Rollback.
     let rolled = rollback_to_version(&config, 1).unwrap();
     assert_eq!(rolled.backup_version, 1);
     assert_eq!(rolled.restored_targets.len(), 1);
 
-    // Simulate the CLI appending a RolledBack event.
-    let rollback_event = make_event(
-        0,
-        EventKind::RolledBack {
-            reason: "manual rollback to version 1".to_string(),
-        },
-    );
-    write_event(&log_path, &rollback_event);
+    // Same writer the CLI's `rollback` subcommand uses.
+    append_event(
+        &log_path,
+        &make_event(
+            0,
+            EventKind::RolledBack {
+                reason: "manual rollback to version 1".to_string(),
+            },
+        ),
+    )
+    .unwrap();
 
     let events = read_events(&log_path);
     assert_eq!(events.len(), 2);
     assert!(matches!(events[1].kind, EventKind::RolledBack { .. }));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("recipes/target.yaml")).unwrap(),
+        "version: 1\ntitle: baseline\n"
+    );
 }
 
 #[test]
 fn empty_log_directory_does_not_panic() {
     let root = tempfile::tempdir().unwrap();
-    let log_path = root.path().join("rsi/evolution.jsonl");
-    // No file exists.
-    let events = read_events(&log_path);
-    assert!(events.is_empty());
+    assert!(read_events(&root.path().join("rsi/evolution.jsonl")).is_empty());
 }
 
 #[test]
@@ -262,38 +244,32 @@ fn history_shows_fitness_score_for_solidified_chain() {
     let log_path = root.path().join("rsi/evolution.jsonl");
 
     let report = passing_report(&proposal_with_score(0.5), 0.85);
-    write_event(
-        &log_path,
-        &make_event(
+    let chain = [
+        make_event(
             1,
             EventKind::Proposed {
                 targets: vec!["recipes/x.yaml".into()],
             },
         ),
-    );
-    write_event(&log_path, &make_event(1, EventKind::Validated));
-    write_event(
-        &log_path,
-        &make_event(1, EventKind::FitnessEvaluated { report }),
-    );
-    write_event(
-        &log_path,
-        &make_event(1, EventKind::Applied { backup_version: 1 }),
-    );
-    write_event(&log_path, &make_event(1, EventKind::Solidified));
+        make_event(1, EventKind::Validated),
+        make_event(1, EventKind::FitnessEvaluated { report }),
+        make_event(1, EventKind::Applied { backup_version: 1 }),
+        make_event(1, EventKind::Solidified),
+    ];
+    for event in &chain {
+        append_event(&log_path, event).unwrap();
+    }
 
     let events = read_events(&log_path);
     assert_eq!(events.len(), 5);
 
-    // The fitness event must carry the score.
-    let fitness_event = events
-        .iter()
-        .find(|e| matches!(e.kind, EventKind::FitnessEvaluated { .. }))
-        .unwrap();
-    if let EventKind::FitnessEvaluated { report } = &fitness_event.kind {
-        assert!((report.score - 0.85).abs() < 0.01);
-        assert!(report.passed);
-    } else {
-        panic!("expected FitnessEvaluated");
-    }
+    // The rendered history (production renderer) must surface the score.
+    let rendered = render_history(&events, 20);
+    assert!(
+        rendered.contains("FitnessEvaluated (score: 0.8500, passed: true)"),
+        "history must show the fitness score, got:\n{rendered}"
+    );
+    assert!(rendered.contains("Solidified"));
+    // Newest first.
+    assert!(rendered.lines().next().unwrap().contains("Solidified"));
 }

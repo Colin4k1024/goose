@@ -18,9 +18,13 @@
 //! 3. **fail-closed full chain** — a proposal generator that always lowers
 //!    fitness never mutates the managed root: fitness gate refuses apply,
 //!    the proposal is rolled back, and after two regressions the breaker
-//!    trips.
+//!    trips;
+//! 4. **the gate scores the mutation, not the baseline** — the change set is
+//!    materialized into a throwaway candidate copy of the workspace snapshot
+//!    and the eval suite runs there, so the report describes the candidate
+//!    that would be applied rather than the untouched snapshot.
 
-use crate::apply::{self, apply, recover, ApplyConfig, Change};
+use crate::apply::{self, apply, materialize_candidate, recover, ApplyConfig, Change};
 use crate::fitness::{run_fitness, FitnessConfig, FitnessReport};
 use crate::proposal::{MutationProposal, MutationTarget};
 use crate::state::{tag, ProposalState, ProposalStateMachine};
@@ -252,8 +256,12 @@ impl EvolutionLoop {
 
         self.append_event(cycle, &proposal.id.to_string(), &EventKind::Validated)?;
 
-        // Fitness evaluation on a read-only snapshot.
-        let report = run_fitness(&self.fitness_config, &proposal, &self.workspace_snapshot).await;
+        // The suite must score the *mutation*, not the untouched snapshot:
+        // materialize the change set into a throwaway candidate copy and run
+        // fitness there. The copy is removed when the cycle ends.
+        let changes = self.synthesize_changes(&proposal);
+        let candidate = self.stage_candidate(&changes)?;
+        let report = run_fitness(&self.fitness_config, &proposal, &candidate.root).await;
         self.append_event(
             cycle,
             &proposal.id.to_string(),
@@ -262,7 +270,6 @@ impl EvolutionLoop {
             },
         )?;
 
-        let changes = self.synthesize_changes(&proposal);
         let passed_gate = report.passed && report.score >= proposal.fitness.minimum_score;
 
         if !passed_gate {
@@ -330,6 +337,23 @@ impl EvolutionLoop {
             breaker_tripped: false,
             fitness_score: Some(report.score),
         })
+    }
+
+    /// Materialize the change set into a throwaway candidate copy of the
+    /// workspace snapshot. The eval suite scores this copy, so the resulting
+    /// report describes the mutation that would actually be applied — not
+    /// the untouched baseline.
+    fn stage_candidate(&self, changes: &[Change]) -> Result<CandidateSnapshot, LoopError> {
+        let root =
+            std::env::temp_dir().join(format!("goose-rsi-candidate-{}", uuid::Uuid::new_v4()));
+        copy_tree(&self.workspace_snapshot, &root)?;
+        match materialize_candidate(&root, changes) {
+            Ok(()) => Ok(CandidateSnapshot { root }),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&root);
+                Err(e.into())
+            }
+        }
     }
 
     /// Produce the change set for a proposal. In production this comes from
@@ -452,6 +476,32 @@ struct LoopState {
 /// Cross-process loop lock guard. The OS releases the flock on process death.
 struct LoopLock {
     _file: std::fs::File,
+}
+
+/// Throwaway copy of the workspace snapshot with the change set materialized.
+/// Removed when the cycle ends, whatever the outcome.
+struct CandidateSnapshot {
+    root: PathBuf,
+}
+
+impl Drop for CandidateSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
