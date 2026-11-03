@@ -663,8 +663,6 @@ async fn payload_passes_through_verbatim_to_apply() {
     seed_managed_root(managed.path());
     seed_managed_root(snapshot.path());
 
-    let expected_content = "name: verbatim-payload-test\nversion: 42\n";
-
     let loop_ = EvolutionLoop::new(
         ApplyConfig::new(managed.path()),
         stub_passing_fitness_config(logs.path()),
@@ -684,7 +682,4 @@ async fn payload_passes_through_verbatim_to_apply() {
         !applied.contains("RSI mutation cycle\n# proposal:"),
         "no placeholder synthesis must appear"
     );
-
-    // Verify the DemandingGenerator's payload is exactly what landed on disk
-    let _ = expected_content; // content comes from generator's PayloadChange
 }
