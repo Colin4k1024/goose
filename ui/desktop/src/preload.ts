@@ -2,6 +2,7 @@ import Electron, { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { Recipe } from './recipe';
 import type { GooseApp } from './types/apps';
 import type { Settings, SettingKey } from './utils/settings';
+import type { RsiCommand } from './types/rsi';
 import { defaultSettings } from './utils/settings';
 import type { OpenExternalUrlResult } from './utils/urlSecurity';
 
@@ -118,6 +119,7 @@ type ElectronAPI = {
     error?: string;
   } | null>;
   getBinaryPath: (binaryName: string) => Promise<string>;
+  runRsi: (command: RsiCommand) => Promise<string>;
   selectRecipeFile: () => Promise<FileResponse | null>;
   readGoosehints: () => Promise<FileResponse>;
   writeGoosehints: (content: string) => Promise<boolean>;
@@ -217,6 +219,7 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.invoke('select-file-or-directory', defaultPath),
   selectImportSessionFile: () => ipcRenderer.invoke('select-import-session-file'),
   getBinaryPath: (binaryName: string) => ipcRenderer.invoke('get-binary-path', binaryName),
+  runRsi: (command: RsiCommand) => ipcRenderer.invoke('run-rsi', command),
   selectRecipeFile: () => ipcRenderer.invoke('select-recipe-file'),
   readGoosehints: () => ipcRenderer.invoke('read-goosehints'),
   writeGoosehints: (content: string) => ipcRenderer.invoke('write-goosehints', content),

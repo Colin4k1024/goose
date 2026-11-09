@@ -5,6 +5,7 @@ import {
   History,
   MessageSquarePlus,
   Puzzle,
+  RotateCcw,
   Settings,
   Zap,
 } from 'lucide-react';
@@ -22,6 +23,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { id: 'home', path: '/', label: 'New Chat', icon: MessageSquarePlus },
   { id: 'recipes', path: '/recipes', label: 'Recipes', icon: FileText },
+  { id: 'rsi', path: '/rsi', label: 'RSI', icon: RotateCcw },
   { id: 'skills', path: '/skills', label: 'Skills', icon: Zap },
   { id: 'apps', path: '/apps', label: 'Apps', icon: AppWindow },
   { id: 'scheduler', path: '/schedules', label: 'Scheduler', icon: Clock },
@@ -47,6 +49,10 @@ const navItemMessages = defineMessages({
   recipes: {
     id: 'navigation.itemRecipes',
     defaultMessage: 'Recipes',
+  },
+  rsi: {
+    id: 'navigation.itemRsi',
+    defaultMessage: 'RSI Evolution',
   },
   skills: {
     id: 'navigation.itemSkills',

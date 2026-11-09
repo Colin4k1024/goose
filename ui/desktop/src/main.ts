@@ -30,7 +30,8 @@ import 'dotenv/config';
 import { connectRemoteBackend } from './remoteBackends';
 import { installBackendCertificateVerifiers } from './backendCertificateVerifier';
 import { configureProxy } from './proxy';
-import { startGooseServe } from './gooseServe';
+import { findGooseBinaryPath, startGooseServe } from './gooseServe';
+import { getRsiArgs } from './rsiCommand';
 import { getLoginShellPath } from './loginShellPath';
 import { GooseServeLeaseRegistry, type GooseServeLease } from './gooseServeLeaseRegistry';
 import { normalizeAcpHttpBaseUrl } from './acp/url';
@@ -1909,6 +1910,57 @@ ipcMain.handle('add-recent-dir', (_event, dir: string) => {
 
 ipcMain.handle('list-recent-dirs', () => {
   return loadRecentDirs();
+});
+
+let rsiMutationRunning = false;
+
+ipcMain.handle('run-rsi', async (event, request: unknown) => {
+  requireRegularRendererWindow(event);
+  const args = getRsiArgs(request);
+  const isMutation = args[1] === 'init' || args[1] === 'evolve' || args[1] === 'rollback';
+  if (isMutation && rsiMutationRunning) {
+    throw new Error('An RSI operation is already running');
+  }
+  if (isMutation) rsiMutationRunning = true;
+
+  try {
+    const binaryPath = findGooseBinaryPath({
+      isPackaged: app.isPackaged,
+      resourcesPath: app.isPackaged ? process.resourcesPath : undefined,
+    });
+    const loginShellPath = await getLoginShellPath(log);
+    const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+    const env = {
+      ...process.env,
+      [pathKey]: [loginShellPath, process.env[pathKey], path.dirname(binaryPath)]
+        .filter(Boolean)
+        .join(path.delimiter),
+    };
+    delete env.GOOSE_PATH_ROOT;
+    if (appConfig.GOOSE_PATH_ROOT) env.GOOSE_PATH_ROOT = appConfig.GOOSE_PATH_ROOT;
+
+    return await new Promise<string>((resolve, reject) => {
+      execFile(
+        binaryPath,
+        args,
+        {
+          cwd: appConfig.GOOSE_WORKING_DIR || os.homedir(),
+          env,
+          windowsHide: true,
+          maxBuffer: 4 * 1024 * 1024,
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr.trim() || stdout.trim() || error.message));
+          } else {
+            resolve(stdout.trim());
+          }
+        }
+      );
+    });
+  } finally {
+    if (isMutation) rsiMutationRunning = false;
+  }
 });
 
 ipcMain.handle('list-git-worktree-dirs', async (_event, dir: string) => {

@@ -4834,5 +4834,59 @@
   },
   "contextXray.autoCompactionPending": {
     "defaultMessage": "已超过自动压缩阈值：在发送下一个请求之前会先压缩对话。"
+  },
+  "navigation.itemRsi": {
+    "defaultMessage": "RSI 进化"
+  },
+  "rsi.backupVersion": {
+    "defaultMessage": "备份版本"
+  },
+  "rsi.cancel": {
+    "defaultMessage": "取消"
+  },
+  "rsi.confirmEvolve": {
+    "defaultMessage": "运行一轮 RSI 进化吗？这会调用已配置的模型、评测候选修改，并可能更新受管理的配方。"
+  },
+  "rsi.confirmRollback": {
+    "defaultMessage": "恢复备份版本 {version} 吗？这会替换当前受管理的配方。"
+  },
+  "rsi.description": {
+    "defaultMessage": "使用固定训练任务和保留任务评测配方修改，再决定是否接受。"
+  },
+  "rsi.evolve": {
+    "defaultMessage": "运行一轮进化"
+  },
+  "rsi.history": {
+    "defaultMessage": "最近事件"
+  },
+  "rsi.initialize": {
+    "defaultMessage": "安装示例基准"
+  },
+  "rsi.loading": {
+    "defaultMessage": "加载中…"
+  },
+  "rsi.refresh": {
+    "defaultMessage": "刷新"
+  },
+  "rsi.restore": {
+    "defaultMessage": "恢复"
+  },
+  "rsi.rollback": {
+    "defaultMessage": "恢复备份"
+  },
+  "rsi.rollbackDescription": {
+    "defaultMessage": "输入“状态”中显示的备份版本，以恢复受管理的配方。"
+  },
+  "rsi.run": {
+    "defaultMessage": "运行"
+  },
+  "rsi.running": {
+    "defaultMessage": "运行中…"
+  },
+  "rsi.status": {
+    "defaultMessage": "状态"
+  },
+  "rsi.title": {
+    "defaultMessage": "RSI 进化"
   }
 }

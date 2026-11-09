@@ -45,6 +45,7 @@ import PermissionSettingsView from './components/settings/permission/PermissionS
 import ExtensionsView, { ExtensionsViewOptions } from './components/extensions/ExtensionsView';
 import RecipesView from './components/recipes/RecipesView';
 import SkillsView from './components/skills/SkillsView';
+import RsiView from './components/rsi/RsiView';
 import AppsView from './components/apps/AppsView';
 import StandaloneAppView from './components/apps/StandaloneAppView';
 import { View, ViewOptions } from './utils/navigationUtils';
@@ -675,6 +676,7 @@ export function AppInner() {
               <Route path="sessions" element={<SessionsRoute />} />
               <Route path="schedules" element={<SchedulesRoute />} />
               <Route path="recipes" element={<RecipesRoute />} />
+              <Route path="rsi" element={<RsiView />} />
               <Route path="skills" element={<SkillsRoute />} />
               <Route path="permission" element={<PermissionRoute />} />
             </Route>

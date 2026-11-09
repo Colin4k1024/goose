@@ -4834,5 +4834,59 @@
   },
   "contextXray.autoCompactionPending": {
     "defaultMessage": "自動コンパクション閾値を超えています。次のリクエストを送信する前に会話がコンパクションされます。"
+  },
+  "navigation.itemRsi": {
+    "defaultMessage": "RSI Evolution"
+  },
+  "rsi.backupVersion": {
+    "defaultMessage": "Backup version"
+  },
+  "rsi.cancel": {
+    "defaultMessage": "Cancel"
+  },
+  "rsi.confirmEvolve": {
+    "defaultMessage": "Run one RSI evolution cycle? This calls your configured model, evaluates the candidate, and may change the managed recipe."
+  },
+  "rsi.confirmRollback": {
+    "defaultMessage": "Restore backup version {version}? This replaces the current managed recipe."
+  },
+  "rsi.description": {
+    "defaultMessage": "Evaluate recipe changes against fixed training and holdout tasks before accepting them."
+  },
+  "rsi.evolve": {
+    "defaultMessage": "Run one cycle"
+  },
+  "rsi.history": {
+    "defaultMessage": "Recent events"
+  },
+  "rsi.initialize": {
+    "defaultMessage": "Install sample benchmark"
+  },
+  "rsi.loading": {
+    "defaultMessage": "Loading…"
+  },
+  "rsi.refresh": {
+    "defaultMessage": "Refresh"
+  },
+  "rsi.restore": {
+    "defaultMessage": "Restore"
+  },
+  "rsi.rollback": {
+    "defaultMessage": "Restore backup"
+  },
+  "rsi.rollbackDescription": {
+    "defaultMessage": "Enter a backup version shown in Status to restore the managed recipe."
+  },
+  "rsi.run": {
+    "defaultMessage": "Run cycle"
+  },
+  "rsi.running": {
+    "defaultMessage": "Running…"
+  },
+  "rsi.status": {
+    "defaultMessage": "Status"
+  },
+  "rsi.title": {
+    "defaultMessage": "RSI Evolution"
   }
 }
