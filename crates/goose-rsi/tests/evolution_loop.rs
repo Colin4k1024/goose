@@ -9,7 +9,10 @@ use goose_rsi::evolution::{
     EventKind, EvolutionEvent, EvolutionLoop, LoopContext, ProposalGenerationError,
     ProposalGenerator,
 };
-use goose_rsi::fitness::{FitnessCommand, FitnessConfig, FitnessSuite, TestDepth, TestPhases};
+use goose_rsi::fitness::{
+    BenchmarkSplit, BenchmarkSuite, BenchmarkTask, FitnessCommand, FitnessConfig, FitnessSuite,
+    TestDepth, TestPhases,
+};
 use goose_rsi::proposal::{
     FitnessExpectation, MutationProposal, MutationTarget, PayloadChange, ProposalSource,
 };
@@ -412,6 +415,58 @@ async fn fitness_scores_the_mutated_candidate_not_the_baseline() {
         baseline,
         "fitness evaluation must not write into the workspace snapshot"
     );
+}
+
+#[tokio::test]
+async fn benchmark_holdout_regression_prevents_apply() {
+    let managed = tempfile::tempdir().unwrap();
+    let snapshot = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    seed_managed_root(managed.path());
+    seed_managed_root(snapshot.path());
+    let original = std::fs::read(snapshot.path().join("recipes/search.yaml")).unwrap();
+    let task = |id: &str, split, needle: &str| {
+        BenchmarkTask {
+        id: id.to_string(),
+        split,
+        command: FitnessCommand {
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!("if grep -q '{needle}' recipes/search.yaml; then echo 'OVERALL RESULT: PASS'; else echo 'OVERALL RESULT: FAIL'; fi"),
+            ],
+        },
+    }
+    };
+    let suite = BenchmarkSuite {
+        target: "recipes/search.yaml".to_string(),
+        tasks: vec![
+            task(
+                "improvement",
+                BenchmarkSplit::Training,
+                "RSI mutation cycle",
+            ),
+            task("preserve-title", BenchmarkSplit::Holdout, "title: baseline"),
+        ],
+    };
+    let loop_ = EvolutionLoop::new(
+        ApplyConfig::new(managed.path()),
+        stub_passing_fitness_config(logs.path()),
+        Arc::new(ImprovingGenerator),
+        snapshot.path(),
+    )
+    .with_benchmark(suite);
+
+    let outcome = loop_.tick().await.unwrap();
+    assert!(!outcome.solidified);
+    assert!(outcome.rolled_back);
+    assert_eq!(
+        std::fs::read(managed.path().join("recipes/search.yaml")).unwrap(),
+        original
+    );
+    assert!(read_evolution_log(managed.path())
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::BenchmarkEvaluated { .. })));
 }
 
 #[tokio::test]

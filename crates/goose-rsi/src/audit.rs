@@ -55,6 +55,13 @@ pub fn render_event(event: &EvolutionEvent) -> String {
             "FitnessEvaluated (score: {:.4}, passed: {})",
             report.score, report.passed
         ),
+        crate::evolution::EventKind::BenchmarkEvaluated { result } => format!(
+            "BenchmarkEvaluated (training: {:.4} → {:.4}, holdout: {:.4} → {:.4})",
+            result.baseline_score,
+            result.candidate_score,
+            result.baseline_holdout_score,
+            result.candidate_holdout_score
+        ),
         crate::evolution::EventKind::Applied { backup_version } => {
             format!("Applied (backup v{backup_version})")
         }

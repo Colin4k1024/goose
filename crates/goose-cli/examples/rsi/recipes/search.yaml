@@ -1,0 +1,18 @@
+version: 1.0.0
+title: Catalog lookup
+description: Answer fixed questions about a small example catalog.
+parameters:
+  - key: query
+    input_type: string
+    requirement: required
+    description: Catalog query code
+instructions: |
+  Use this catalog as the source of truth:
+  - Atlas metrics: owner Mabel, refresh daily.
+  - Cedar audit: owner Niko, refresh weekly.
+  - Delta tickets: owner Priya, refresh daily.
+  - Ember docs: owner Lin, refresh monthly.
+
+  Query codes ending in _owner ask for the owner. Codes ending in _refresh ask
+  for the refresh frequency.
+prompt: 'For catalog query code {{ query }}, reply with exactly "Unknown" and nothing else.'

@@ -1,0 +1,37 @@
+{
+  "target": "recipes/search.yaml",
+  "tasks": [
+    {
+      "id": "atlas-owner",
+      "split": "training",
+      "command": {
+        "program": "sh",
+        "args": ["-c", "answer=$(\"$GOOSE_RSI_EXECUTABLE\" run --no-session --recipe recipes/search.yaml --params query=atlas_owner) || exit 1; printf '%s\\n' \"$answer\"; printf '%s\\n' \"$answer\" | tail -n 1 | grep -Fq 'Mabel' && echo 'OVERALL RESULT: PASS' || echo 'OVERALL RESULT: FAIL'"]
+      }
+    },
+    {
+      "id": "cedar-refresh",
+      "split": "training",
+      "command": {
+        "program": "sh",
+        "args": ["-c", "answer=$(\"$GOOSE_RSI_EXECUTABLE\" run --no-session --recipe recipes/search.yaml --params query=cedar_refresh) || exit 1; printf '%s\\n' \"$answer\"; printf '%s\\n' \"$answer\" | tail -n 1 | grep -Fq 'weekly' && echo 'OVERALL RESULT: PASS' || echo 'OVERALL RESULT: FAIL'"]
+      }
+    },
+    {
+      "id": "delta-owner",
+      "split": "holdout",
+      "command": {
+        "program": "sh",
+        "args": ["-c", "answer=$(\"$GOOSE_RSI_EXECUTABLE\" run --no-session --recipe recipes/search.yaml --params query=delta_owner) || exit 1; printf '%s\\n' \"$answer\"; printf '%s\\n' \"$answer\" | tail -n 1 | grep -Fq 'Priya' && echo 'OVERALL RESULT: PASS' || echo 'OVERALL RESULT: FAIL'"]
+      }
+    },
+    {
+      "id": "ember-refresh",
+      "split": "holdout",
+      "command": {
+        "program": "sh",
+        "args": ["-c", "answer=$(\"$GOOSE_RSI_EXECUTABLE\" run --no-session --recipe recipes/search.yaml --params query=ember_refresh) || exit 1; printf '%s\\n' \"$answer\"; printf '%s\\n' \"$answer\" | tail -n 1 | grep -Fq 'monthly' && echo 'OVERALL RESULT: PASS' || echo 'OVERALL RESULT: FAIL'"]
+      }
+    }
+  ]
+}

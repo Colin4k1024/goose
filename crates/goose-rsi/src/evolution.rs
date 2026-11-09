@@ -25,7 +25,9 @@
 //!    that would be applied rather than the untouched snapshot.
 
 use crate::apply::{self, apply, materialize_candidate, recover, ApplyConfig, Change};
-use crate::fitness::{run_fitness, FitnessConfig, FitnessReport};
+use crate::fitness::{
+    run_benchmark, run_fitness, BenchmarkResult, BenchmarkSuite, FitnessConfig, FitnessReport,
+};
 use crate::proposal::{MutationProposal, MutationTarget, PayloadChange};
 use crate::state::{tag, ProposalState, ProposalStateMachine};
 use serde::{Deserialize, Serialize};
@@ -79,6 +81,9 @@ pub enum EventKind {
     Validated,
     FitnessEvaluated {
         report: FitnessReport,
+    },
+    BenchmarkEvaluated {
+        result: BenchmarkResult,
     },
     Applied {
         backup_version: u32,
@@ -136,6 +141,7 @@ pub struct EvolutionLoop {
     state_path: PathBuf,
     /// Max proposals per cycle (default 1).
     max_proposals_per_cycle: u32,
+    benchmark: Option<BenchmarkSuite>,
 }
 
 impl EvolutionLoop {
@@ -156,7 +162,13 @@ impl EvolutionLoop {
             lock_path: rsi_dir.join("loop.lock"),
             state_path: rsi_dir.join("loop-state.json"),
             max_proposals_per_cycle: 1,
+            benchmark: None,
         }
+    }
+
+    pub fn with_benchmark(mut self, benchmark: BenchmarkSuite) -> Self {
+        self.benchmark = Some(benchmark);
+        self
     }
 
     pub fn with_max_proposals_per_cycle(mut self, max: u32) -> Self {
@@ -224,7 +236,7 @@ impl EvolutionLoop {
         cycle: u32,
         context: &LoopContext,
     ) -> Result<CycleOutcome, LoopError> {
-        let proposal = match self.generator.generate(context).await {
+        let mut proposal = match self.generator.generate(context).await {
             Ok(proposal) => proposal,
             Err(ProposalGenerationError::NothingToPropose) => {
                 return Ok(CycleOutcome {
@@ -237,6 +249,19 @@ impl EvolutionLoop {
             }
             Err(error) => return Err(LoopError::GenerationFailed(error.to_string())),
         };
+
+        if let Some(suite) = &self.benchmark {
+            let expected = MutationTarget::FilePath {
+                path: suite.target.clone(),
+            };
+            if proposal.targets != vec![expected]
+                || !matches!(proposal.payload.as_slice(), [PayloadChange::FileChange { path, .. }] if path == &suite.target)
+            {
+                return Err(LoopError::GenerationFailed(
+                    "proposal must change only the benchmark target".to_string(),
+                ));
+            }
+        }
 
         let machine = ProposalStateMachine::new(proposal.clone());
         let targets: Vec<String> = proposal
@@ -265,7 +290,37 @@ impl EvolutionLoop {
         // fitness there. The copy is removed when the cycle ends.
         let changes = self.synthesize_changes(&proposal);
         let candidate = self.stage_candidate(&changes)?;
-        let report = run_fitness(&self.fitness_config, &proposal, &candidate.root).await;
+        let report = if let Some(suite) = &self.benchmark {
+            let evidence_dir = self.fitness_config.log_dir.join(proposal.id.to_string());
+            std::fs::create_dir_all(&evidence_dir)?;
+            std::fs::copy(
+                self.workspace_snapshot.join(&suite.target),
+                evidence_dir.join("baseline.yaml"),
+            )?;
+            std::fs::copy(
+                candidate.root.join(&suite.target),
+                evidence_dir.join("candidate.yaml"),
+            )?;
+            let result = run_benchmark(
+                &self.fitness_config,
+                suite,
+                &proposal,
+                &self.workspace_snapshot,
+                &candidate.root,
+            )
+            .await?;
+            proposal.fitness.baseline_score = result.baseline_score;
+            proposal.fitness.minimum_score = result.baseline_score;
+            let report = result.report.clone();
+            self.append_event(
+                cycle,
+                &proposal.id.to_string(),
+                &EventKind::BenchmarkEvaluated { result },
+            )?;
+            report
+        } else {
+            run_fitness(&self.fitness_config, &proposal, &candidate.root).await
+        };
         self.append_event(
             cycle,
             &proposal.id.to_string(),

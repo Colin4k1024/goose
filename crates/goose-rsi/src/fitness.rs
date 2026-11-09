@@ -13,11 +13,10 @@
 //! * **no panic, no lock**: timeouts and child crashes degrade to a
 //!   failure report; the executor is stateless and holds no cross-run locks,
 //!   so a SIGKILLed executor never blocks the next invocation;
-//! * **determinism**: the same proposal + the same workspace snapshot produce
-//!   the same score; only timestamps, durations and log paths may differ;
-//! * **read-only snapshot**: the executor never writes into the workspace
-//!   snapshot it is given; suite artifacts are directed to the
-//!   executor-managed log directory.
+//! * **fixed tasks**: the paired benchmark uses the same task definitions for
+//!   baseline and candidate; model-backed tasks can still vary across runs;
+//! * **isolated benchmark inputs**: each task gets its own copy of the
+//!   snapshot, so task writes cannot affect another task's score.
 //!
 //! The default suite command shells out to
 //! `goose run --recipe <self-test> --params test_phases=<..> --params
@@ -176,6 +175,222 @@ pub struct FitnessReport {
     pub timestamp: SystemTime,
 }
 
+/// A frozen set of behavior checks. Keep this file outside the mutation whitelist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkSuite {
+    pub target: String,
+    pub tasks: Vec<BenchmarkTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkTask {
+    pub id: String,
+    pub split: BenchmarkSplit,
+    pub command: FitnessCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchmarkSplit {
+    Training,
+    Holdout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkTaskResult {
+    pub id: String,
+    pub split: BenchmarkSplit,
+    pub baseline: FitnessReport,
+    pub candidate: FitnessReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkResult {
+    pub baseline_score: f64,
+    pub candidate_score: f64,
+    pub baseline_holdout_score: f64,
+    pub candidate_holdout_score: f64,
+    pub tasks: Vec<BenchmarkTaskResult>,
+    pub report: FitnessReport,
+}
+
+impl BenchmarkSuite {
+    pub fn validate(&self) -> Result<(), String> {
+        crate::whitelist::validate_target(&crate::proposal::MutationTarget::FilePath {
+            path: self.target.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        if !self.target.starts_with("recipes/") || !self.target.ends_with(".yaml") {
+            return Err("benchmark target must be a recipe YAML file".to_string());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for task in &self.tasks {
+            if task.id.is_empty()
+                || !task
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                || !ids.insert(&task.id)
+                || task.command.program.is_empty()
+            {
+                return Err(format!("invalid or duplicate benchmark task: {}", task.id));
+            }
+        }
+        if !self
+            .tasks
+            .iter()
+            .any(|t| t.split == BenchmarkSplit::Training)
+            || !self
+                .tasks
+                .iter()
+                .any(|t| t.split == BenchmarkSplit::Holdout)
+        {
+            return Err("benchmark requires training and holdout tasks".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Run each fixed task on both snapshots. A task must emit the same overall
+/// verdict contract as `run_fitness`; failures and timeouts score zero.
+pub async fn run_benchmark(
+    config: &FitnessConfig,
+    suite: &BenchmarkSuite,
+    proposal: &MutationProposal,
+    baseline: &Path,
+    candidate: &Path,
+) -> std::io::Result<BenchmarkResult> {
+    suite.validate().map_err(std::io::Error::other)?;
+    if std::fs::read(baseline.join(&suite.target))? == std::fs::read(candidate.join(&suite.target))?
+    {
+        return Err(std::io::Error::other(
+            "benchmark target is unchanged in the candidate",
+        ));
+    }
+    let started = Instant::now();
+    let mut tasks = Vec::with_capacity(suite.tasks.len());
+    for task in &suite.tasks {
+        let baseline_copy = BenchmarkSnapshot::new(baseline)?;
+        let candidate_copy = BenchmarkSnapshot::new(candidate)?;
+        let mut task_config = config.clone();
+        task_config.command = Some(task.command.clone());
+        task_config.log_dir = config
+            .log_dir
+            .join(proposal.id.to_string())
+            .join(&task.id)
+            .join("baseline");
+        let baseline_report = run_fitness(&task_config, proposal, &baseline_copy.root).await;
+        task_config.log_dir = config
+            .log_dir
+            .join(proposal.id.to_string())
+            .join(&task.id)
+            .join("candidate");
+        let candidate_report = run_fitness(&task_config, proposal, &candidate_copy.root).await;
+        tasks.push(BenchmarkTaskResult {
+            id: task.id.clone(),
+            split: task.split,
+            baseline: baseline_report,
+            candidate: candidate_report,
+        });
+    }
+    let mean = |split: BenchmarkSplit, candidate: bool| {
+        let selected: Vec<_> = tasks.iter().filter(|t| t.split == split).collect();
+        selected
+            .iter()
+            .map(|t| {
+                if candidate {
+                    t.candidate.score
+                } else {
+                    t.baseline.score
+                }
+            })
+            .sum::<f64>()
+            / selected.len() as f64
+    };
+    let baseline_score = mean(BenchmarkSplit::Training, false);
+    let candidate_score = mean(BenchmarkSplit::Training, true);
+    let baseline_holdout_score = mean(BenchmarkSplit::Holdout, false);
+    let candidate_holdout_score = mean(BenchmarkSplit::Holdout, true);
+    let mut failed_phases: Vec<_> = tasks
+        .iter()
+        .filter(|t| {
+            t.candidate.score < t.baseline.score
+                || [&t.baseline, &t.candidate].iter().any(|report| {
+                    report.failed_phases.iter().any(|phase| {
+                        phase == "timeout"
+                            || phase == "spawn-failed"
+                            || phase == "unparseable-output"
+                            || phase.starts_with("exit:")
+                            || phase.starts_with("crash:")
+                    })
+                })
+        })
+        .map(|t| t.id.clone())
+        .collect();
+    if candidate_score <= baseline_score {
+        failed_phases.push("training-no-improvement".to_string());
+    }
+    if candidate_holdout_score == 0.0 {
+        failed_phases.push("holdout-no-success".to_string());
+    }
+    let passed = candidate_score > baseline_score
+        && candidate_holdout_score > 0.0
+        && candidate_holdout_score >= baseline_holdout_score
+        && failed_phases.is_empty();
+    let report = FitnessReport {
+        proposal_id: proposal.id.to_string(),
+        passed,
+        score: candidate_score,
+        failed_phases,
+        duration: started.elapsed(),
+        raw_log_ref: config.log_dir.join(proposal.id.to_string()),
+        timestamp: SystemTime::now(),
+    };
+    Ok(BenchmarkResult {
+        baseline_score,
+        candidate_score,
+        baseline_holdout_score,
+        candidate_holdout_score,
+        tasks,
+        report,
+    })
+}
+
+struct BenchmarkSnapshot {
+    root: PathBuf,
+}
+
+impl BenchmarkSnapshot {
+    fn new(source: &Path) -> std::io::Result<Self> {
+        let root = std::env::temp_dir().join(format!("goose-rsi-task-{}", uuid::Uuid::new_v4()));
+        if let Err(error) = copy_benchmark_tree(source, &root) {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(error);
+        }
+        Ok(Self { root })
+    }
+}
+
+impl Drop for BenchmarkSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn copy_benchmark_tree(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let dest = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_benchmark_tree(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
 impl FitnessReport {
     /// Compare the deterministic core of two reports (everything except
     /// duration, log path and timestamp).
@@ -222,6 +437,9 @@ pub async fn run_fitness(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Ok(executable) = std::env::current_exe() {
+        command.env("GOOSE_RSI_EXECUTABLE", executable);
+    }
 
     let mut report = match tokio::time::timeout(config.timeout, command.output()).await {
         Err(_elapsed) => degraded(

@@ -6,7 +6,8 @@
 //! executor is killed mid-run.
 
 use goose_rsi::fitness::{
-    run_fitness, FitnessCommand, FitnessConfig, FitnessSuite, TestDepth, TestPhases,
+    run_benchmark, run_fitness, BenchmarkSplit, BenchmarkSuite, BenchmarkTask, FitnessCommand,
+    FitnessConfig, FitnessSuite, TestDepth, TestPhases,
 };
 use goose_rsi::proposal::{FitnessExpectation, MutationProposal, MutationTarget, ProposalSource};
 use goose_rsi::whitelist::{validate_target, WhitelistCheck};
@@ -124,6 +125,7 @@ fn fitness_definitions_live_outside_the_mutation_whitelist() {
         "crates/goose-rsi/src/fitness.rs",
         "crates/goose-rsi/src/whitelist.rs",
         "goose-self-test.yaml",
+        "rsi/benchmark.json",
     ] {
         let error = validate_target(&MutationTarget::FilePath {
             path: frozen.to_string(),
@@ -345,4 +347,92 @@ async fn report_serializes_to_json_for_evidence() {
     let json = serde_json::to_string_pretty(&report).unwrap();
     assert!(json.contains("\"passed\": true"));
     assert!(json.contains("\"score\": 1.0"));
+}
+
+fn benchmark_task(id: &str, split: BenchmarkSplit, needle: &str) -> BenchmarkTask {
+    BenchmarkTask {
+        id: id.to_string(),
+        split,
+        command: bash(&format!(
+            "if grep -q '{needle}' recipes/search.yaml; then echo 'OVERALL RESULT: PASS'; else echo 'OVERALL RESULT: FAIL'; fi"
+        )),
+    }
+}
+
+#[tokio::test]
+async fn benchmark_compares_fixed_tasks_and_preserves_holdout() {
+    let logs = tempfile::tempdir().unwrap();
+    let baseline = snapshot_dir();
+    let candidate = snapshot_dir();
+    std::fs::write(baseline.path().join("recipes/search.yaml"), "safe").unwrap();
+    std::fs::write(candidate.path().join("recipes/search.yaml"), "good safe").unwrap();
+    let suite = BenchmarkSuite {
+        target: "recipes/search.yaml".to_string(),
+        tasks: vec![
+            benchmark_task("search-quality", BenchmarkSplit::Training, "good"),
+            benchmark_task("safety", BenchmarkSplit::Holdout, "safe"),
+        ],
+    };
+    suite.validate().unwrap();
+
+    let result = run_benchmark(
+        &config_with(bash("exit 1"), logs.path()),
+        &suite,
+        &proposal(),
+        baseline.path(),
+        candidate.path(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.baseline_score, 0.0);
+    assert_eq!(result.candidate_score, 1.0);
+    assert_eq!(result.baseline_holdout_score, 1.0);
+    assert_eq!(result.candidate_holdout_score, 1.0);
+    assert!(result.report.passed);
+    assert!(result
+        .tasks
+        .iter()
+        .all(|task| task.baseline.raw_log_ref.exists() && task.candidate.raw_log_ref.exists()));
+
+    std::fs::write(candidate.path().join("recipes/search.yaml"), "good").unwrap();
+    let regression = run_benchmark(
+        &config_with(bash("exit 1"), logs.path()),
+        &suite,
+        &proposal(),
+        baseline.path(),
+        candidate.path(),
+    )
+    .await
+    .unwrap();
+    assert!(!regression.report.passed);
+    assert_eq!(
+        regression.report.failed_phases,
+        vec!["safety".to_string(), "holdout-no-success".to_string()]
+    );
+}
+
+#[test]
+fn benchmark_rejects_missing_split_and_duplicate_tasks() {
+    let task = benchmark_task("search-quality", BenchmarkSplit::Training, "good");
+    assert!(BenchmarkSuite {
+        target: "recipes/search.yaml".to_string(),
+        tasks: vec![task.clone()]
+    }
+    .validate()
+    .is_err());
+    assert!(BenchmarkSuite {
+        target: "recipes/search.yaml".to_string(),
+        tasks: vec![task.clone(), task]
+    }
+    .validate()
+    .is_err());
+    assert!(BenchmarkSuite {
+        target: "rsi/benchmark.json".to_string(),
+        tasks: vec![
+            benchmark_task("train", BenchmarkSplit::Training, "good"),
+            benchmark_task("held-out", BenchmarkSplit::Holdout, "safe"),
+        ]
+    }
+    .validate()
+    .is_err());
 }

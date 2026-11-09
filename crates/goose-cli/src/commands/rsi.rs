@@ -3,7 +3,9 @@ use goose::config::paths::Paths;
 use goose_rsi::apply::{list_backup_versions, rollback_to_version, ApplyConfig};
 use goose_rsi::audit::{append_event, read_breaker, read_events, read_loop_state, render_history};
 use goose_rsi::evolution::{EventKind, EvolutionEvent, EvolutionLoop, LoopContext};
-use goose_rsi::fitness::{FitnessCommand, FitnessConfig, FitnessSuite, TestDepth, TestPhases};
+use goose_rsi::fitness::{
+    BenchmarkSplit, BenchmarkSuite, FitnessConfig, FitnessSuite, TestDepth, TestPhases,
+};
 use goose_rsi::proposal::MutationProposal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +13,8 @@ use std::sync::Arc;
 /// RSI subcommands for auditing and managing the evolution loop.
 #[derive(clap::Subcommand)]
 pub enum RsiCommand {
+    /// Install a sample recipe and fixed benchmark without replacing existing files
+    Init,
     /// Show current RSI status: circuit breaker, cycle count, backup versions
     Status,
     /// List evolution events from the append-only JSONL log
@@ -24,13 +28,16 @@ pub enum RsiCommand {
         /// Backup version number to restore
         version: u32,
     },
-    /// Run one evolution cycle: detect → propose → validate → fitness → apply → solidify
+    /// Run one evolution cycle using rsi/benchmark.json as the fitness gate
     Evolve,
 }
 
 pub async fn handle_rsi_command(command: &RsiCommand) -> Result<()> {
     let managed_root = Paths::config_dir();
     match command {
+        RsiCommand::Init => {
+            println!("{}", init_rsi(&managed_root)?);
+        }
         RsiCommand::Status => {
             println!("{}", status_report(&managed_root));
         }
@@ -46,6 +53,35 @@ pub async fn handle_rsi_command(command: &RsiCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn init_rsi(managed_root: &Path) -> Result<String> {
+    use std::io::Write;
+
+    let recipe = managed_root.join("recipes/search.yaml");
+    let benchmark = managed_root.join("rsi/benchmark.json");
+    anyhow::ensure!(
+        std::fs::symlink_metadata(&recipe).is_err()
+            && std::fs::symlink_metadata(&benchmark).is_err(),
+        "RSI sample already exists; existing recipe or benchmark was not replaced"
+    );
+    std::fs::create_dir_all(recipe.parent().unwrap())?;
+    std::fs::create_dir_all(benchmark.parent().unwrap())?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&recipe)?
+        .write_all(include_str!("../../examples/rsi/recipes/search.yaml").as_bytes())?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&benchmark)?
+        .write_all(include_str!("../../examples/rsi/rsi/benchmark.json").as_bytes())?;
+    Ok(format!(
+        "Installed sample RSI recipe at {} and benchmark at {}",
+        recipe.display(),
+        benchmark.display()
+    ))
 }
 
 fn status_report(managed_root: &Path) -> String {
@@ -68,6 +104,18 @@ fn status_report(managed_root: &Path) -> String {
     match snapshot.last_fitness {
         Some(score) => report.push_str(&format!("  Last fitness:  {score:.4}\n")),
         None => report.push_str("  Last fitness:  (none)\n"),
+    }
+    let benchmark = std::fs::read(rsi_dir.join("benchmark.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BenchmarkSuite>(&bytes).ok())
+        .filter(|suite| suite.validate().is_ok());
+    match benchmark {
+        Some(suite) => report.push_str(&format!(
+            "  Benchmark:     {} ({} tasks)\n",
+            suite.target,
+            suite.tasks.len()
+        )),
+        None => report.push_str("  Benchmark:     missing or invalid\n"),
     }
     if backups.is_empty() {
         report.push_str("  Backups:       (none)\n");
@@ -118,26 +166,83 @@ fn rollback_and_log(managed_root: &Path, version: u32) -> Result<String> {
 
 /// Run one evolution cycle on the user's managed root.
 async fn evolve_one_cycle(managed_root: &Path) -> Result<String> {
+    let benchmark_path = managed_root.join("rsi/benchmark.json");
+    let benchmark: BenchmarkSuite =
+        serde_json::from_slice(&std::fs::read(&benchmark_path).with_context(|| {
+            format!("RSI benchmark is required at {}", benchmark_path.display())
+        })?)?;
+    benchmark.validate().map_err(anyhow::Error::msg)?;
+    let target_path = managed_root.join(&benchmark.target);
+    let current_recipe = std::fs::read_to_string(&target_path)
+        .with_context(|| format!("benchmark target is missing: {}", target_path.display()))?;
+    goose::recipe::validate_recipe::validate_recipe_template_from_content(
+        &current_recipe,
+        target_path.parent().map(|path| path.display().to_string()),
+    )?;
+
     let apply_config = ApplyConfig::new(managed_root);
-    let snapshot_dir = managed_root.join("rsi-snapshot");
-    std::fs::create_dir_all(&snapshot_dir)?;
+    let snapshot_dir = tempfile::tempdir()?;
+    for name in ["recipes", "prompts"] {
+        let source = managed_root.join(name);
+        if source.is_dir() {
+            copy_evaluation_inputs(&source, &snapshot_dir.path().join(name))?;
+        }
+    }
 
     let fitness_config = default_fitness_config(managed_root);
     let generator = Arc::new(LlmProposalGenerator {
         managed_root: managed_root.to_path_buf(),
+        benchmark: benchmark.clone(),
     });
 
-    let loop_ = EvolutionLoop::new(apply_config, fitness_config, generator, &snapshot_dir);
+    let loop_ = EvolutionLoop::new(apply_config, fitness_config, generator, snapshot_dir.path())
+        .with_benchmark(benchmark);
 
     let outcome = loop_.tick().await?;
-    Ok(format!(
+    let mut summary = format!(
         "cycle {}: solidified={}, rolled_back={}, breaker_tripped={}, fitness_score={:?}",
         outcome.cycle,
         outcome.solidified,
         outcome.rolled_back,
         outcome.breaker_tripped,
         outcome.fitness_score
-    ))
+    );
+    if outcome.fitness_score.is_some() {
+        if let Some(result) = read_events(&managed_root.join("rsi/evolution.jsonl"))
+            .into_iter()
+            .rev()
+            .find_map(|event| match event.kind {
+                EventKind::BenchmarkEvaluated { result } if event.cycle == outcome.cycle => {
+                    Some(result)
+                }
+                _ => None,
+            })
+        {
+            summary.push_str(&format!(
+                "\ntraining: {:.3} → {:.3}; holdout: {:.3} → {:.3}",
+                result.baseline_score,
+                result.candidate_score,
+                result.baseline_holdout_score,
+                result.candidate_holdout_score
+            ));
+        }
+    }
+    Ok(summary)
+}
+
+fn copy_evaluation_inputs(source: &Path, target: &Path) -> Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let dest = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_evaluation_inputs(&entry.path(), &dest)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn default_fitness_config(managed_root: &Path) -> FitnessConfig {
@@ -146,27 +251,17 @@ fn default_fitness_config(managed_root: &Path) -> FitnessConfig {
             phases: TestPhases::Basic,
             depth: TestDepth::Quick,
         },
-        command: Some(FitnessCommand {
-            program: "sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "if test -f recipes/search.yaml && test -s recipes/search.yaml; then \
-                 echo 'OVERALL RESULT: PASS'; \
-                 else echo 'OVERALL RESULT: FAIL'; fi"
-                    .to_string(),
-            ],
-        }),
+        command: None,
         self_test_recipe: PathBuf::from("goose-self-test.yaml"),
         timeout: std::time::Duration::from_secs(300),
         log_dir: managed_root.join("rsi/fitness-logs"),
     }
 }
 
-/// LLM-backed proposal generator. Uses the configured goose provider to
-/// generate a mutation proposal. On any failure (provider unavailable,
-/// timeout, parse error), returns `NothingToPropose` — zero writes.
+/// LLM-backed proposal generator for one benchmark target.
 pub struct LlmProposalGenerator {
     managed_root: PathBuf,
+    benchmark: BenchmarkSuite,
 }
 
 #[async_trait::async_trait]
@@ -175,36 +270,44 @@ impl goose_rsi::evolution::ProposalGenerator for LlmProposalGenerator {
         &self,
         _context: &LoopContext,
     ) -> Result<MutationProposal, goose_rsi::evolution::ProposalGenerationError> {
-        generate_with_provider(&self.managed_root).await
+        generate_with_provider(&self.managed_root, &self.benchmark).await
     }
 }
 
 async fn generate_with_provider(
     managed_root: &Path,
+    benchmark: &BenchmarkSuite,
 ) -> Result<MutationProposal, goose_rsi::evolution::ProposalGenerationError> {
     use goose::config::Config;
     use goose_rsi::proposal::{FitnessExpectation, MutationTarget, PayloadChange, ProposalSource};
 
-    let config = Config::global();
-    let provider_name = match config.get_goose_provider() {
-        Ok(name) => name,
-        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
-    };
-    let model_name = match config.get_goose_model() {
-        Ok(name) => name,
-        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
-    };
+    use goose_rsi::evolution::ProposalGenerationError;
 
-    let provider = match goose::providers::create(&provider_name, vec![]).await {
-        Ok(p) => p,
-        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
-    };
+    let target_path = managed_root.join(&benchmark.target);
+    let current_content = std::fs::read_to_string(&target_path)
+        .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
+    if current_content.len() > 32_000 {
+        return Err(ProposalGenerationError::Failed(
+            "recipe exceeds the proposal context limit".to_string(),
+        ));
+    }
+
+    let config = Config::global();
+    let provider_name = config
+        .get_goose_provider()
+        .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
+    let model_name = config
+        .get_goose_model()
+        .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
+    let provider = goose::providers::create(&provider_name, vec![])
+        .await
+        .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
 
     let model_config = goose_providers::model::ModelConfig {
         model_name: model_name.clone(),
         context_limit: None,
-        temperature: Some(0.7),
-        max_tokens: Some(2048),
+        temperature: Some(0.2),
+        max_tokens: Some(8192),
         toolshim: false,
         toolshim_model: None,
         request_params: None,
@@ -212,31 +315,34 @@ async fn generate_with_provider(
         supports_vision: None,
         request_headers: None,
     };
-    if provider.apply_model_selection(&model_config).await.is_err() {
-        return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose);
-    }
+    provider
+        .apply_model_selection(&model_config)
+        .await
+        .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
 
-    let recipe_files = list_recipe_files(managed_root);
-    let system_prompt = build_system_prompt(&recipe_files);
+    let system_prompt = build_system_prompt(&benchmark.target);
     let user_message = goose_providers::conversation::message::Message::user()
-        .with_text(build_user_prompt(&recipe_files));
+        .with_text(build_user_prompt(benchmark, &current_content));
 
-    let (response, _usage) = match provider
+    let (response, _usage) = provider
         .complete(&model_config, &system_prompt, &[user_message], &[])
         .await
-    {
-        Ok(result) => result,
-        Err(_) => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
-    };
+        .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
 
     let text = response.content.iter().find_map(|block| block.as_text());
     let text = match text {
         Some(t) => t,
-        None => return Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+        None => {
+            return Err(ProposalGenerationError::Failed(
+                "provider returned no text proposal".to_string(),
+            ))
+        }
     };
 
     match parse_proposal_response(text) {
-        Some((path, content)) => {
+        Some((path, content)) if path == benchmark.target && content != current_content => {
+            validate_recipe_change(&current_content, &content, &target_path)
+                .map_err(|error| ProposalGenerationError::Failed(error.to_string()))?;
             let target = MutationTarget::FilePath { path: path.clone() };
             Ok(MutationProposal::new(
                 "llm-generated",
@@ -244,62 +350,70 @@ async fn generate_with_provider(
                 vec![target.clone()],
                 FitnessExpectation {
                     baseline_score: 0.0,
-                    minimum_score: 0.0,
+                    minimum_score: 1.0,
                 },
                 vec![PayloadChange::FileChange { path, content }],
             ))
         }
-        None => Err(goose_rsi::evolution::ProposalGenerationError::NothingToPropose),
+        Some((_, content)) if content == current_content => {
+            Err(ProposalGenerationError::NothingToPropose)
+        }
+        _ => Err(ProposalGenerationError::Failed(
+            "model proposal is invalid or targets a different recipe".to_string(),
+        )),
     }
 }
 
-fn list_recipe_files(managed_root: &Path) -> Vec<String> {
-    let recipes_dir = managed_root.join("recipes");
-    if !recipes_dir.is_dir() {
-        return vec![];
-    }
-    std::fs::read_dir(&recipes_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| format!("recipes/{s}"))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn build_system_prompt(recipe_files: &[String]) -> String {
+fn build_system_prompt(target: &str) -> String {
     format!(
         "You are an RSI (Recursive Self-Improvement) proposal generator.\n\
-         Your task: suggest a small, safe improvement to one recipe file.\n\
-         Available recipe files: {}\n\n\
+         Improve the existing goose recipe at {target}.\n\
+         Change only its prompt or instructions fields. Preserve every other field.\n\
          Respond with ONLY a JSON object, no markdown fences:\n\
-         {{\"file_path\": \"recipes/<name>.yaml\", \"content\": \"<full file content>\"}}\n\
-         The content must be valid YAML for a goose recipe.\n\
-         Keep changes minimal and safe.",
-        recipe_files.join(", ")
+         {{\"file_path\": \"{target}\", \"content\": \"<full file content>\"}}\n\
+         Return valid goose recipe YAML. Do not change extensions, settings, parameters, or permissions."
     )
 }
 
-fn build_user_prompt(recipe_files: &[String]) -> String {
-    if recipe_files.is_empty() {
-        "No recipe files found. Propose creating recipes/search.yaml with a basic search recipe."
-            .to_string()
-    } else {
-        format!(
-            "Read the current recipe files and propose a small improvement.\n\
-             Files: {}\n\
-             Output the JSON with file_path and improved content.",
-            recipe_files.join(", ")
-        )
-    }
+fn build_user_prompt(benchmark: &BenchmarkSuite, current_content: &str) -> String {
+    let training = benchmark
+        .tasks
+        .iter()
+        .filter(|task| task.split == BenchmarkSplit::Training)
+        .map(|task| {
+            format!(
+                "{}: {} {:?}",
+                task.id, task.command.program, task.command.args
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Current recipe at {}:\n```yaml\n{}\n```\n\nTraining tasks and checks:\n{}\n\nPropose a focused improvement to the recipe text for these tasks. The proposal will be checked against additional hidden tasks.",
+        benchmark.target, current_content, training
+    )
+}
+
+fn validate_recipe_change(before: &str, after: &str, target_path: &Path) -> Result<()> {
+    let mut previous: serde_yaml::Mapping = serde_yaml::from_str(before)?;
+    let mut proposed: serde_yaml::Mapping = serde_yaml::from_str(after)?;
+    let prompt_key = serde_yaml::Value::String("prompt".to_string());
+    let instructions_key = serde_yaml::Value::String("instructions".to_string());
+    let previous_prompt = previous.remove(&prompt_key);
+    let proposed_prompt = proposed.remove(&prompt_key);
+    let previous_instructions = previous.remove(&instructions_key);
+    let proposed_instructions = proposed.remove(&instructions_key);
+    anyhow::ensure!(
+        previous == proposed
+            && (previous_prompt != proposed_prompt
+                || previous_instructions != proposed_instructions),
+        "proposal may only change prompt or instructions"
+    );
+    goose::recipe::validate_recipe::validate_recipe_template_from_content(
+        after,
+        target_path.parent().map(|path| path.display().to_string()),
+    )?;
+    Ok(())
 }
 
 fn parse_proposal_response(text: &str) -> Option<(String, String)> {
@@ -319,6 +433,7 @@ fn parse_proposal_response(text: &str) -> Option<(String, String)> {
 mod tests {
     use super::*;
     use goose_rsi::apply::{apply, Change};
+    use goose_rsi::fitness::{BenchmarkTask, FitnessCommand};
     use goose_rsi::proposal::{FitnessExpectation, MutationTarget, PayloadChange, ProposalSource};
     use std::time::{Duration, SystemTime};
 
@@ -409,5 +524,60 @@ mod tests {
         assert!(report.contains("healthy"));
         assert!(report.contains("(none)"));
         assert!(report.contains("Cycle count:   0"));
+    }
+
+    #[test]
+    fn proposal_uses_current_recipe_and_hides_holdout_tasks() {
+        let task = |id: &str, split, answer: &str| BenchmarkTask {
+            id: id.to_string(),
+            split,
+            command: FitnessCommand {
+                program: "sh".to_string(),
+                args: vec![answer.to_string()],
+            },
+        };
+        let benchmark = BenchmarkSuite {
+            target: "recipes/search.yaml".to_string(),
+            tasks: vec![
+                task("train", BenchmarkSplit::Training, "visible answer"),
+                task("holdout", BenchmarkSplit::Holdout, "hidden answer"),
+            ],
+        };
+        let prompt = build_user_prompt(&benchmark, "instructions: current recipe");
+        assert!(prompt.contains("current recipe"));
+        assert!(prompt.contains("visible answer"));
+        assert!(!prompt.contains("hidden answer"));
+    }
+
+    #[test]
+    fn recipe_mutation_is_limited_to_prompt_and_instructions() {
+        let before = "version: 1.0.0\ntitle: Search\ndescription: Search docs\ninstructions: old\n";
+        let safe =
+            "version: 1.0.0\ntitle: Search\ndescription: Search docs\ninstructions: improved\n";
+        let unsafe_change =
+            "version: 1.0.0\ntitle: Changed\ndescription: Search docs\ninstructions: improved\n";
+        let path = Path::new("recipes/search.yaml");
+        assert!(validate_recipe_change(before, safe, path).is_ok());
+        assert!(validate_recipe_change(before, unsafe_change, path).is_err());
+    }
+
+    #[test]
+    fn init_installs_a_valid_fixed_benchmark_without_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        init_rsi(root.path()).unwrap();
+        let recipe_path = root.path().join("recipes/search.yaml");
+        let benchmark_path = root.path().join("rsi/benchmark.json");
+        let recipe = std::fs::read_to_string(&recipe_path).unwrap();
+        goose::recipe::validate_recipe::validate_recipe_template_from_content(
+            &recipe,
+            recipe_path.parent().map(|path| path.display().to_string()),
+        )
+        .unwrap();
+        let benchmark: BenchmarkSuite =
+            serde_json::from_slice(&std::fs::read(&benchmark_path).unwrap()).unwrap();
+        benchmark.validate().unwrap();
+        assert_eq!(benchmark.tasks.len(), 4);
+        assert!(init_rsi(root.path()).is_err());
+        assert_eq!(std::fs::read_to_string(recipe_path).unwrap(), recipe);
     }
 }
