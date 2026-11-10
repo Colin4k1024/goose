@@ -17,11 +17,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const TARGET: &str = "prompts/learned-behavior.md";
 const MAX_RULES_BYTES: usize = 8_192;
-const COOLDOWN: Duration = Duration::from_secs(300);
 const MIN_IMPROVEMENT: f64 = 0.1;
 const HOLDOUTS: [(&str, &str); 4] = [
     ("Reply with exactly READY and nothing else.", "READY"),
@@ -108,7 +107,7 @@ pub fn status_line(root: &Path) -> String {
     let events = read_events(root);
     let last = events.last().map_or("none", |event| event.outcome.as_str());
     let mut status = format!(
-        "  Automatic behavior evolution: enabled (after explicit corrections)\n  Learned rules: {count} (last attempt: {last})"
+        "  Automatic behavior evolution: enabled (after each completed turn)\n  Learned rules: {count} (last attempt: {last})"
     );
     if let Some(rules) = rules {
         status.push_str(&format!("\n{rules}"));
@@ -143,9 +142,10 @@ pub fn history_lines(root: &Path, limit: usize) -> String {
         .join("\n")
 }
 
-pub async fn evolve_from_correction(
-    correction: String,
-    previous_reply: String,
+pub async fn evolve_from_turn(
+    user_request: String,
+    assistant_reply: String,
+    explicit_correction: bool,
     provider_name: String,
     mut model: ModelConfig,
 ) -> Result<()> {
@@ -160,7 +160,7 @@ pub async fn evolve_from_correction(
         return Ok(());
     }
 
-    let feedback_id = Sha256::digest(correction.as_bytes())
+    let feedback_id = Sha256::digest(user_request.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -170,10 +170,7 @@ pub async fn evolve_from_correction(
         .ok()
         .and_then(|raw| serde_json::from_str::<AttemptMarker>(&raw).ok())
     {
-        if now.saturating_sub(marker.at_secs) < COOLDOWN.as_secs()
-            || (marker.feedback_id == feedback_id
-                && now.saturating_sub(marker.at_secs) < 24 * 60 * 60)
-        {
+        if marker.feedback_id == feedback_id && now.saturating_sub(marker.at_secs) < 24 * 60 * 60 {
             return Ok(());
         }
     }
@@ -192,10 +189,15 @@ pub async fn evolve_from_correction(
     let provider = providers::create(&provider_name, vec![]).await?;
     provider.apply_model_selection(&model).await?;
 
+    let context = if explicit_correction {
+        "The user is correcting the assistant's previous response."
+    } else {
+        "This is an ordinary completed conversation turn."
+    };
     let proposal_prompt = format!(
-        "Previous assistant response:\n{}\n\nUser correction:\n{}\n\nExisting learned rules:\n{}\n\nExtract ONE short, generalizable behavior rule for future conversations. Do not copy names, paths, credentials, or private details. Do not restate an existing rule. Reply only with JSON: {{\"rule\":\"...\"}}. If there is no reusable rule, return {{\"rule\":\"\"}}.",
-        truncate(&previous_reply, 4_000),
-        truncate(&correction, 4_000),
+        "{context}\nUser message:\n{}\n\nAssistant response for review:\n{}\n\nExisting learned rules:\n{}\n\nExtract ONE short, generalizable behavior rule only if the user expressed a lasting preference or the assistant response has a concrete, observable flaw. Do not infer a flaw merely because a different response is possible. Do not copy names, paths, credentials, or private details. Do not restate an existing rule. Reply only with JSON: {{\"rule\":\"...\"}}. If there is no reusable improvement, return {{\"rule\":\"\"}}.",
+        truncate(&user_request, 4_000),
+        truncate(&assistant_reply, 4_000),
         before
     );
     let response = complete_text(
@@ -222,16 +224,16 @@ pub async fn evolve_from_correction(
 
     let started = Instant::now();
     let replay = format!(
-        "The assistant previously replied:\n{}\n\nThe user corrected it:\n{}\n\nRespond to the user's correction.",
-        truncate(&previous_reply, 4_000),
-        truncate(&correction, 4_000)
+        "Assistant response for context:\n{}\n\nUser message:\n{}\n\nRespond to the user message.",
+        truncate(&assistant_reply, 4_000),
+        truncate(&user_request, 4_000)
     );
     let baseline_answer = answer(&provider, &model, &before, &replay).await?;
     let candidate_answer = answer(&provider, &model, &after, &replay).await?;
     let (baseline, candidate) = judge(
         &provider,
         &model,
-        &correction,
+        &user_request,
         &baseline_answer,
         &candidate_answer,
     )
@@ -250,7 +252,7 @@ pub async fn evolve_from_correction(
     let passed = passes_behavior_gate(baseline, candidate, baseline_holdout, candidate_holdout);
 
     let proposal = MutationProposal::new(
-        "Behavior rule learned from explicit user correction",
+        "Behavior rule learned from a completed user turn",
         ProposalSource::Session,
         vec![MutationTarget::FilePath {
             path: TARGET.to_string(),

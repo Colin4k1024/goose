@@ -4851,7 +4851,7 @@
     "defaultMessage": "恢复备份版本 {version} 吗？这会替换当前受管理的文件。"
   },
   "rsi.description": {
-    "defaultMessage": "日常对话中的纠正会自动提出行为规则，并在评测通过后启用；下方也可手动进化配方。"
+    "defaultMessage": "每轮对话结束后，Goose 都会检查可复用的行为改进；候选规则通过评测后才启用。下方也可手动进化配方。"
   },
   "rsi.evolve": {
     "defaultMessage": "运行一轮进化"

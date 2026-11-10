@@ -12,7 +12,7 @@ const i18n = defineMessages({
   description: {
     id: 'rsi.description',
     defaultMessage:
-      'Corrections in daily chats automatically propose behavior rules. Each rule is evaluated before use; manual recipe evolution is available below.',
+      'After each chat turn, Goose checks for reusable behavior improvements. Candidates are evaluated before use; manual recipe evolution is available below.',
   },
   refresh: { id: 'rsi.refresh', defaultMessage: 'Refresh' },
   initialize: { id: 'rsi.initialize', defaultMessage: 'Install sample benchmark' },

@@ -3417,7 +3417,7 @@
     "defaultMessage": "Restore backup version {version}? This replaces the current managed files."
   },
   "rsi.description": {
-    "defaultMessage": "Corrections in daily chats automatically propose behavior rules. Each rule is evaluated before use; manual recipe evolution is available below."
+    "defaultMessage": "After each chat turn, Goose checks for reusable behavior improvements. Candidates are evaluated before use; manual recipe evolution is available below."
   },
   "rsi.evolve": {
     "defaultMessage": "Run one cycle"

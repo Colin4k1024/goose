@@ -893,10 +893,9 @@ impl StateMachineServices {
             }
         }
 
-        let correction = user_message.user_visible_content().as_concat_text();
-        let previous_reply = if session_config.schedule_id.is_none()
-            && crate::rsi_behavior::is_explicit_correction(&correction)
-        {
+        let user_request = user_message.user_visible_content().as_concat_text();
+        let explicit_correction = crate::rsi_behavior::is_explicit_correction(&user_request);
+        let previous_reply = if session_config.schedule_id.is_none() && explicit_correction {
             session_manager
                 .get_session(&session_id, true)
                 .await
@@ -955,25 +954,32 @@ impl StateMachineServices {
             });
         }
 
+        let should_evolve = session_config.schedule_id.is_none() && !user_request.trim().is_empty();
         let evolution_cancel = cancel.clone();
         let stream = self.turn(session_config, cancel, turn_guard, true);
-        let Some(previous_reply) = previous_reply else {
+        if !should_evolve {
             return Ok(stream);
-        };
+        }
         Ok(Box::pin(async_stream::try_stream! {
             let mut stream = stream;
             while let Some(event) = stream.next().await {
                 yield event?;
             }
             if !evolution_cancel.is_cancelled() {
-                if let Ok(session) = session_manager.get_session(&session_id, false).await {
-                    if let (Some(provider_name), Some(model)) = (session.provider_name, session.model_config) {
+                if let Ok(session) = session_manager.get_session(&session_id, true).await {
+                    let assistant_reply = previous_reply.or_else(|| {
+                        session.conversation.as_ref().and_then(crate::rsi_behavior::previous_assistant_reply)
+                    });
+                    if let (Some(provider_name), Some(model), Some(assistant_reply)) =
+                        (session.provider_name, session.model_config, assistant_reply)
+                    {
                         tokio::spawn(async move {
                             let result = tokio::time::timeout(
                                 Duration::from_secs(180),
-                                crate::rsi_behavior::evolve_from_correction(
-                                    correction,
-                                    previous_reply,
+                                crate::rsi_behavior::evolve_from_turn(
+                                    user_request,
+                                    assistant_reply,
+                                    explicit_correction,
                                     provider_name,
                                     model,
                                 ),
