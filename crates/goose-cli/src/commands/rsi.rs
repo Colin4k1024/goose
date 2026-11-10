@@ -123,19 +123,27 @@ fn status_report(managed_root: &Path) -> String {
         report.push_str(&format!("  Backups:       {backups:?}\n"));
     }
     report.push_str(&format!("  Events logged: {event_count}"));
+    report.push_str(&format!(
+        "\n{}",
+        goose::rsi_behavior::status_line(managed_root)
+    ));
     report
 }
 
 fn history_report(managed_root: &Path, limit: usize) -> String {
     let log_path = managed_root.join("rsi/evolution.jsonl");
-    if !log_path.exists() {
-        return format!("No evolution log found at {}", log_path.display());
-    }
     let events = read_events(&log_path);
-    if events.is_empty() {
-        return "Evolution log is empty or unreadable.".to_string();
+    let manual = if events.is_empty() {
+        format!("No evolution log found at {}", log_path.display())
+    } else {
+        render_history(&events, limit)
+    };
+    let behavior = goose::rsi_behavior::history_lines(managed_root, limit);
+    if behavior.is_empty() {
+        manual
+    } else {
+        format!("{manual}\nAutomatic behavior evolution:\n{behavior}")
     }
-    render_history(&events, limit)
 }
 
 fn rollback_and_log(managed_root: &Path, version: u32) -> Result<String> {

@@ -893,6 +893,23 @@ impl StateMachineServices {
             }
         }
 
+        let correction = user_message.user_visible_content().as_concat_text();
+        let previous_reply = if session_config.schedule_id.is_none()
+            && crate::rsi_behavior::is_explicit_correction(&correction)
+        {
+            session_manager
+                .get_session(&session_id, true)
+                .await
+                .ok()
+                .filter(|session| session.schedule_id.is_none())
+                .and_then(|session| session.conversation)
+                .and_then(|conversation| {
+                    crate::rsi_behavior::previous_assistant_reply(&conversation)
+                })
+        } else {
+            None
+        };
+
         let (turn_guard, evicted) = {
             let _lifetime = self.runtime.lock_lifetime(&session_id).await;
             let turn_guard = self
@@ -938,7 +955,50 @@ impl StateMachineServices {
             });
         }
 
-        Ok(self.turn(session_config, cancel, turn_guard, true))
+        let evolution_cancel = cancel.clone();
+        let stream = self.turn(session_config, cancel, turn_guard, true);
+        let Some(previous_reply) = previous_reply else {
+            return Ok(stream);
+        };
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut stream = stream;
+            while let Some(event) = stream.next().await {
+                yield event?;
+            }
+            if !evolution_cancel.is_cancelled() {
+                if let Ok(session) = session_manager.get_session(&session_id, false).await {
+                    if let (Some(provider_name), Some(model)) = (session.provider_name, session.model_config) {
+                        tokio::spawn(async move {
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(180),
+                                crate::rsi_behavior::evolve_from_correction(
+                                    correction,
+                                    previous_reply,
+                                    provider_name,
+                                    model,
+                                ),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    warn!(%error, "Automatic behavior evolution failed");
+                                    if let Err(log_error) = crate::rsi_behavior::record_failure() {
+                                        warn!(%log_error, "Could not record behavior evolution failure");
+                                    }
+                                }
+                                Err(_) => {
+                                    warn!("Automatic behavior evolution timed out");
+                                    if let Err(log_error) = crate::rsi_behavior::record_failure() {
+                                        warn!(%log_error, "Could not record behavior evolution timeout");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }))
     }
 
     /// Runs a subagent on the conversation saved for it.

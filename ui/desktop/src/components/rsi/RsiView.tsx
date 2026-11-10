@@ -12,7 +12,7 @@ const i18n = defineMessages({
   description: {
     id: 'rsi.description',
     defaultMessage:
-      'Evaluate recipe changes against fixed training and holdout tasks before accepting them.',
+      'Corrections in daily chats automatically propose behavior rules. Each rule is evaluated before use; manual recipe evolution is available below.',
   },
   refresh: { id: 'rsi.refresh', defaultMessage: 'Refresh' },
   initialize: { id: 'rsi.initialize', defaultMessage: 'Install sample benchmark' },
@@ -25,7 +25,7 @@ const i18n = defineMessages({
   backupVersion: { id: 'rsi.backupVersion', defaultMessage: 'Backup version' },
   rollbackDescription: {
     id: 'rsi.rollbackDescription',
-    defaultMessage: 'Enter a backup version shown in Status to restore the managed recipe.',
+    defaultMessage: 'Enter a backup version shown in Status to restore managed files, including learned behavior rules.',
   },
   confirmEvolve: {
     id: 'rsi.confirmEvolve',
@@ -34,7 +34,7 @@ const i18n = defineMessages({
   },
   confirmRollback: {
     id: 'rsi.confirmRollback',
-    defaultMessage: 'Restore backup version {version}? This replaces the current managed recipe.',
+    defaultMessage: 'Restore backup version {version}? This replaces the current managed files.',
   },
   cancel: { id: 'rsi.cancel', defaultMessage: 'Cancel' },
   run: { id: 'rsi.run', defaultMessage: 'Run cycle' },

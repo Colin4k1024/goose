@@ -4848,10 +4848,10 @@
     "defaultMessage": "运行一轮 RSI 进化吗？这会调用已配置的模型、评测候选修改，并可能更新受管理的配方。"
   },
   "rsi.confirmRollback": {
-    "defaultMessage": "恢复备份版本 {version} 吗？这会替换当前受管理的配方。"
+    "defaultMessage": "恢复备份版本 {version} 吗？这会替换当前受管理的文件。"
   },
   "rsi.description": {
-    "defaultMessage": "使用固定训练任务和保留任务评测配方修改，再决定是否接受。"
+    "defaultMessage": "日常对话中的纠正会自动提出行为规则，并在评测通过后启用；下方也可手动进化配方。"
   },
   "rsi.evolve": {
     "defaultMessage": "运行一轮进化"
@@ -4875,7 +4875,7 @@
     "defaultMessage": "恢复备份"
   },
   "rsi.rollbackDescription": {
-    "defaultMessage": "输入“状态”中显示的备份版本，以恢复受管理的配方。"
+    "defaultMessage": "输入“状态”中显示的备份版本，以恢复受管理的文件，包括已学习的行为规则。"
   },
   "rsi.run": {
     "defaultMessage": "运行"

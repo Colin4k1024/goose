@@ -150,6 +150,10 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
             extras.insert("hints".to_string(), hints);
         }
 
+        if let Some(rules) = crate::rsi_behavior::load_rules() {
+            extras.insert("rsi_learned_behavior".to_string(), rules);
+        }
+
         if goose_mode == GooseMode::Chat {
             extras.insert(
                 "chat_mode".to_string(),

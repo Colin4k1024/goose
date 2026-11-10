@@ -4230,6 +4230,7 @@ dependencies = [
  "goose-download-manager",
  "goose-mcp",
  "goose-providers",
+ "goose-rsi",
  "goose-sdk-types",
  "goose-test-support",
  "http 1.5.0",
